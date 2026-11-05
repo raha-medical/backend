@@ -58,6 +58,14 @@ public static class Permissions
     public const string NotificationsBranchView = "notifications.branch_view";
     public const string BackupsView = "backups.view";
 
+    // ------------------------------------------------------------------ شاشات القائمة الجانبية (الترحيل 017، المواصفة 8.6-ق1)
+    // كل شاشة مربوطة برمز صلاحية لا بدور. الرموز الأربعة الأولى للمدير العام فقط (نقاطها في الـ API للمدير العام).
+    public const string BranchesMap = "branches.map";
+    public const string LookupsManage = "lookups.manage";
+    public const string BackupsManage = "backups.manage";
+    public const string SandboxView = "sandbox.view";
+    public const string PatientsMerge = "patients.merge";
+
     /// <summary>الرموز الأصلية السبعة عشر (قبل الترحيل 009).</summary>
     public static readonly IReadOnlyList<string> Legacy =
     [
@@ -80,6 +88,7 @@ public static class Permissions
     public static readonly IReadOnlySet<string> AdminOnly = new HashSet<string>
     {
         RolesCreate, RolesEdit, RolesDelete, BranchesCreate, BranchesDelete,
+        BranchesMap, LookupsManage, BackupsManage, SandboxView,
     };
 
     public static readonly IReadOnlyList<PermissionSection> Catalog =
@@ -92,6 +101,7 @@ public static class Permissions
         new("patients", "المرضى", [
             new(PatientsWrite, "edit", "تسجيل وتعديل المرضى", "إنشاء ملف مريض وتعديله ودمج الملفات (الدمج لمدير الفرع)"),
             new(PatientsUnban, "special", "فك حظر المريض", "إعفاء أو عربون فك الحظر"),
+            new(PatientsMerge, "special", "دمج ملفات المرضى", "دمج ملفين مكررين سُجلا أوفلاين وأونلاين"),
         ]),
         new("billing", "الفوترة والتحصيل", [
             new(PaymentsCollect, "create", "التحصيل والفواتير", "فتح الوردية، التحصيل، الفاتورة اليدوية، طلب الاسترجاع ضمن الحد"),
@@ -148,6 +158,7 @@ public static class Permissions
             new(BranchesCreate, "create", "إضافة فرع", "للمدير العام فقط"),
             new(BranchesEdit, "edit", "تعديل بيانات الفرع", "الاسم والهاتف والعنوان والموقع وأوقات الدوام، لفروعه المسندة إليه"),
             new(BranchesDelete, "delete", "إيقاف فرع نهائياً", "للمدير العام فقط"),
+            new(BranchesMap, "view", "خريطة الفروع ومقارنتها", "الحالة الحية لكل الفروع ومقارنتها، للمدير العام فقط"),
         ]),
         new("services", "الخدمات والأسعار", [
             new(ServicesView, "view", "عرض كتالوج الخدمات", "يشمل الخدمات الموقوفة (الخدمات الفعالة يراها كل موظفي الفرع)"),
@@ -164,12 +175,15 @@ public static class Permissions
         ]),
         new("settings", "إعدادات الفرع", [
             new(SettingsEdit, "edit", "تعديل إعدادات الفرع", "قراءة الإعدادات متاحة لموظفي الفرع، والإعدادات العامة للمدير العام فقط"),
+            new(LookupsManage, "all", "إدارة قوائم الاختيار", "للمدير العام فقط"),
+            new(SandboxView, "view", "الرسائل التجريبية", "ما كان سيُرسل SMS و Push في الوضع التجريبي، للمدير العام فقط"),
         ]),
         new("notifications", "إشعارات الفرع", [
             new(NotificationsBranchView, "view", "عرض إشعارات الفرع", "إشعارات الموظفين التشغيلية في فرعه الحالي"),
         ]),
         new("backups", "النسخ الاحتياطي", [
             new(BackupsView, "view", "عرض حالة النسخ الاحتياطي", "ملخص حالة نسخ السيرفر، قراءة فقط. الإدارة للمدير العام"),
+            new(BackupsManage, "all", "إدارة النسخ الاحتياطي", "شاشة النسخ وسجل التشغيل والتشغيل اليدوي، للمدير العام فقط"),
         ]),
     ];
 
@@ -197,7 +211,7 @@ public static class Permissions
         [
             UsersManage, ServicesManage, PatientsWrite, PatientsUnban, QueueManage, DiscountsGrant,
             RefundsApprove, ShiftsReview, DeferralsGrant, ReportsFinance, ExpensesManage, RolesView, BranchesView,
-            LabView, RadiologyView, PharmacyView, AuditRead, NotificationsBranchView, BackupsView
+            LabView, RadiologyView, PharmacyView, AuditRead, NotificationsBranchView, BackupsView, PatientsMerge
         ],
         [Roles.Doctor] = [ClinicalWrite, QueueManage, DeferralsGrant],
         [Roles.Receptionist] = [QueueManage, PaymentsCollect, PatientsWrite],
@@ -259,12 +273,13 @@ public static class NavSections
         [Roles.Pharmacist] = (Pharmacy, [Pharmacy]),
     };
 
-    /// <summary>القسم الذي تفتحه كل صلاحية للأدوار المخصصة.</summary>
-    public static string[] ForPermissions(IReadOnlyCollection<string> perms)
+    /// <summary>القسم الذي تفتحه كل صلاحية. systemRole: لأدوار النظام لا تفتح queue.manage وحدها قسم الاستقبال
+    /// (الطبيب يملكها لإدارة طابوره)، أما payments.collect أو patients.write فتفتحه.</summary>
+    public static string[] ForPermissions(IReadOnlyCollection<string> perms, bool systemRole = false)
     {
         bool Any(params string[] codes) => codes.Any(perms.Contains);
         var list = new List<string>();
-        if (Any(Permissions.QueueManage, Permissions.PaymentsCollect, Permissions.PatientsWrite)) list.Add(Reception);
+        if (Any(Permissions.PaymentsCollect, Permissions.PatientsWrite) || (!systemRole && Any(Permissions.QueueManage))) list.Add(Reception);
         if (Any(Permissions.ClinicalWrite)) list.Add(Doctor);
         if (Any(Permissions.LabWrite, Permissions.LabView)) list.Add(Lab);
         if (Any(Permissions.RadiologyWrite, Permissions.RadiologyView)) list.Add(Radiology);
@@ -272,14 +287,21 @@ public static class NavSections
         if (Any(Permissions.ShiftsReview, Permissions.RefundsApprove, Permissions.ReportsFinance, Permissions.AuditRead, Permissions.ExpensesManage))
             list.Add(Accountant);
         if (Any(Permissions.UsersView, Permissions.RolesView, Permissions.BranchesView, Permissions.BranchesEdit, Permissions.ServicesView,
-                Permissions.ServicesManage, Permissions.DevicesView))
+                Permissions.ServicesManage, Permissions.DevicesView, Permissions.PatientsMerge))
             list.Add(Admin);
         return [.. list];
     }
 
     public static (string? Home, IReadOnlyList<string> Sections) Resolve(string role, string? homeOverride, IReadOnlyCollection<string> perms)
     {
-        if (System.TryGetValue(role, out var sys)) return (sys.Home, sys.Sections);
+        // أدوار النظام: الأقسام الثابتة + ما تفتحه صلاحياتها الفعلية (8.6-ق5)، فمنح payments.collect للمحاسب يفتح له شاشة التحصيل.
+        // المدير العام أقسامه ثابتة (يملك كل الرموز).
+        if (System.TryGetValue(role, out var sys))
+        {
+            if (role == Roles.Admin) return (sys.Home, sys.Sections);
+            var extra = ForPermissions(perms, systemRole: true);
+            return (sys.Home, All.Where(s => sys.Sections.Contains(s) || extra.Contains(s)).ToList());
+        }
         var sections = ForPermissions(perms);
         var home = homeOverride is not null && sections.Contains(homeOverride) ? homeOverride : sections.FirstOrDefault();
         return (home, sections);

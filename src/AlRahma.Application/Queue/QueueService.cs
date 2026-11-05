@@ -18,6 +18,8 @@ public record CheckInResponse(Guid TicketId, string TicketNumber, string Status,
     public string? IssuedDateAr { get; init; }
     public string? IssuedTimeAr { get; init; }
     public string? EstimatedTimeAr { get; init; }
+    /// <summary>عربون الحجز المتاح المطروح من amount_due (2.3-ب). يُخصم فعلياً من رصيد المريض عند التحصيل (use_deposit_credit).</summary>
+    public long DepositCredit { get; init; }
 }
 /// <summary>«تمديد اليوم»: النهاية الفعلية الجديدة HH:mm (الجدول الأسبوعي لا يتغير).</summary>
 public record ExtendSessionRequest(string? End);
@@ -241,8 +243,12 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         var (r, already) = await CheckInBookingAsync(booking.BookingId, new CheckInContext(session.BranchId, CheckInMethods.SelfQr), ct);
         var doctorName = await db.Doctors.AsNoTracking().Where(d => d.DoctorId == session.DoctorId).Select(d => d.FullName).FirstAsync(ct);
         var message = r.AmountDue > 0
-            ? $"تم تثبيت حضورك، رقمك {r.TicketNumber}. ادفع {r.AmountDue:N0} د.ع في الاستقبال قبل دخولك."
-            : $"تم تثبيت حضورك، رقمك {r.TicketNumber}. انتظر النداء على الشاشة.";
+            ? (r.DepositCredit > 0
+                ? $"تم تثبيت حضورك، رقمك {r.TicketNumber}. ادفع الباقي {r.AmountDue:N0} د.ع في الاستقبال قبل دخولك (بعد خصم عربونك {r.DepositCredit:N0} د.ع)."
+                : $"تم تثبيت حضورك، رقمك {r.TicketNumber}. ادفع {r.AmountDue:N0} د.ع في الاستقبال قبل دخولك.")
+            : r.DepositCredit > 0
+                ? $"تم تثبيت حضورك، رقمك {r.TicketNumber}. عربونك يغطي المبلغ، راجع الاستقبال لتثبيت الدفع قبل دخولك."
+                : $"تم تثبيت حضورك، رقمك {r.TicketNumber}. انتظر النداء على الشاشة.";
         return new SelfCheckInResponse(booking.BookingId, r.TicketId, r.TicketNumber, r.Status, r.QueuePosition, r.EstimatedTime, r.InvoiceId,
             r.VisitKind, r.AmountDue, r.PaymentStatus, already, doctorName, clinic.Name, clinic.Floor, message);
     }
@@ -349,17 +355,30 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         return await ResponseAsync(ticket, invoice.Items[0], ct);
     }
 
-    private Task<CheckInResponse> ResponseAsync(QueueTicket t, InvoiceItem item, CancellationToken ct)
+    private async Task<CheckInResponse> ResponseAsync(QueueTicket t, InvoiceItem item, CancellationToken ct)
     {
         var status = QueueEngine.PaymentStatusOf(item);
         var due = status is "paid" or "deferred" ? 0 : item.NetPrice;
+        // 2.3-ب: عربون هذا الحجز (booking_deposit) يُطرح من المطلوب، بحد رصيد المريض المتاح فعلاً (قد يكون استُخدم في تحصيل آخر)
+        var deposit = 0L;
+        if (due > 0 && t.BookingId is { } bookingId)
+        {
+            var booked = await db.PatientCredits.Where(c => c.PatientId == t.PatientId && c.BookingId == bookingId && c.Kind == "booking_deposit")
+                .SumAsync(c => (long?)c.Amount, ct) ?? 0;
+            if (booked > 0)
+            {
+                var balance = await db.PatientCredits.Where(c => c.PatientId == t.PatientId).SumAsync(c => (long?)c.Amount, ct) ?? 0;
+                deposit = Math.Clamp(Math.Min(booked, balance), 0, due);
+            }
+        }
         var issued = t.ArrivedAt ?? op.Now;
-        return Task.FromResult(new CheckInResponse(t.TicketId, t.TicketNumber, t.Status, t.QueuePosition, t.EstimatedTime,
-            item.InvoiceId, item.ItemType, due, status, t.IsExtra)
+        return new CheckInResponse(t.TicketId, t.TicketNumber, t.Status, t.QueuePosition, t.EstimatedTime,
+            item.InvoiceId, item.ItemType, due - deposit, status, t.IsExtra)
         {
             IssuedDateAr = ArabicFormat.Date(issued), IssuedTimeAr = ArabicFormat.Time(issued),
             EstimatedTimeAr = t.EstimatedTime is { } eta ? ArabicFormat.Time(eta) : null,
-        });
+            DepositCredit = deposit,
+        };
     }
 
     /// <summary>

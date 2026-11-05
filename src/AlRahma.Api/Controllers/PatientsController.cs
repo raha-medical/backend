@@ -45,7 +45,7 @@ public class PatientsController(PatientService patients) : ControllerBase
 
     /// <summary>دمج ملفين مكررين: كل السجلات تنتقل للملف الأساسي.</summary>
     [HttpPost("merge")]
-    [Authorize(Roles = $"{Roles.Admin},{Roles.BranchManager}")]
+    [Authorize(Policy = Permissions.PatientsMerge)]
     [Idempotent]
     [ProducesResponseType<MergePatientsResponse>(200)]
     public Task<MergePatientsResponse> Merge(MergePatientsRequest req, CancellationToken ct) => patients.MergeAsync(req, ct);

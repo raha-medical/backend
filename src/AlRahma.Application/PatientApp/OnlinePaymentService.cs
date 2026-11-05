@@ -170,6 +170,10 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
     {
         EnsureSandbox();
         new Validator().Check(req.Result is "succeeded" or "failed", "result", "succeeded | failed").ThrowIfInvalid();
+        var owner = await db.OnlinePayments.AsNoTracking().Where(o => o.OnlinePaymentId == onlinePaymentId).Select(o => (Guid?)o.PatientId).FirstOrDefaultAsync(ct)
+                    ?? throw new AppException(404, "ONLINE_PAYMENT_NOT_FOUND", "عملية الدفع غير موجودة");
+        if (!current.IsPatient) throw new AppException(401, "UNAUTHENTICATED", "يتطلب تسجيل الدخول");
+        await portal.EnsureLinkedAsync(owner, ct); // دفعة مريض آخر = 404
         var op = await CompleteAsync(onlinePaymentId, req.Result == "succeeded", $"SBX-{onlinePaymentId:N}",
             JsonSerializer.Serialize(new { provider = SandboxProvider, result = req.Result }), ct);
         return await ToDtoAsync(op, ct);

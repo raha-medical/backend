@@ -862,7 +862,7 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         var v = await VisitAsync(s, branch, patient);
         var pay = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "invoice", patient_id = patient, invoice_id = await app.ScalarAsync<Guid>($"SELECT invoice_id FROM invoice_items WHERE invoice_item_id = '{v.LabItem}'"), provider = "sandbox" }, Guid.NewGuid());
         Assert.True(pay.Status == 201, pay.Raw);
-        Assert.Equal(200, (await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
+        Assert.Equal(200, (await Api.PostAsync(me, $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
         // الدفع من البيت لا يثبت الحضور
         Assert.Equal("referred", S(await ReferralAsync(app.Client(v.LabTech), "lab", "referred", patient), "status"));
 
@@ -906,7 +906,7 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.False(B(order, "result_available"));
 
         var pay = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "invoice", patient_id = patient, invoice_id = Id(order, "invoice_id"), provider = "sandbox" }, Guid.NewGuid());
-        Assert.Equal(200, (await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
+        Assert.Equal(200, (await Api.PostAsync(me, $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
         Assert.Equal(200, (await Api.GetAsync(me, $"/api/v1/lab/orders/{v.LabOrder}/result")).Status);
     }
 
@@ -927,7 +927,7 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         var pay = await Api.PostAsync(me, "/api/v1/online-payments", Body(v.LabItem), Guid.NewGuid());
         Assert.True(pay.Status == 201, pay.Raw);
         Assert.Equal(30000, L(pay.Body, "amount")); // مبلغ البند المعروض، لا مجموع الفاتورة 70,000
-        Assert.Equal(200, (await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
+        Assert.Equal(200, (await Api.PostAsync(me, $"/api/v1/sandbox/pay/{Id(pay.Body, "online_payment_id")}", new { result = "succeeded" })).Status);
 
         var orders = (await Api.GetAsync(me, $"/api/v1/me/patients/{patient}/orders")).Body!["items"]!.AsArray();
         Assert.Equal("paid", S(orders.First(o => Id(o, "order_item_id") == v.LabOrder), "payment_status"));

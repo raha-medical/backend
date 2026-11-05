@@ -125,7 +125,7 @@ public class OfflineTimeTests(TestApp app)
         // انتهت المهلة وعُلّمت منتهية، ثم وصل تأكيد البوابة بالنجاح
         await app.ScalarAsync<int>($"UPDATE online_payments SET expires_at = now() - interval '1 minute' WHERE online_payment_id = '{opId}' RETURNING 1");
         Assert.Equal("expired", S((await Api.GetAsync(me, $"/api/v1/online-payments/{opId}")).Body, "status"));
-        var done = await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
+        var done = await Api.PostAsync(me, $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("succeeded", S(done.Body, "status"));
         Assert.Equal("paid", S((await Api.GetAsync(me, $"/api/v1/bookings/{bookingId}")).Body, "payment_status"));

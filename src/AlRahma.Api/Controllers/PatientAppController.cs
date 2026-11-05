@@ -161,7 +161,7 @@ public class OnlinePaymentsController(OnlinePaymentService payments) : Controlle
 
     /// <summary>محاكاة إشعار البوابة: { "result": "succeeded" | "failed" }.</summary>
     [HttpPost("api/v1/sandbox/pay/{onlinePaymentId:guid}")]
-    [AllowAnonymous]
+    [Authorize(Policy = Policies.Patient)] // أمان: إكمال الدفع يتطلب دخول المريض صاحب الدفعة في كل البيئات (لا استثناء حسب البيئة)
     [Consumes("application/json", "application/x-www-form-urlencoded")]
     [ProducesResponseType<OnlinePaymentDto>(200)]
     public async Task<IActionResult> SandboxComplete(Guid onlinePaymentId, CancellationToken ct)

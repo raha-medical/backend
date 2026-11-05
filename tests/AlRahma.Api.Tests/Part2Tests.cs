@@ -230,7 +230,10 @@ public class Part2Tests(TestApp app)
         var opId = Id(op.Body, "online_payment_id");
         var page = await app.Client().GetAsync($"/api/v1/sandbox/pay/{opId}");
         Assert.Contains("text/html", page.Content.Headers.ContentType!.ToString());
-        var done = await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
+        // أمان: إكمال الدفع بلا تسجيل دخول مرفوض في كل البيئات
+        Assert.Equal(401, (await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" })).Status);
+        Assert.Equal("pending", S((await Api.GetAsync(me, $"/api/v1/online-payments/{opId}")).Body, "status"));
+        var done = await Api.PostAsync(me, $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("succeeded", S(done.Body, "status"));
         Assert.StartsWith("B1-O-", S(done.Body!["receipt"], "receipt_number"));

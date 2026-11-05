@@ -7,8 +7,15 @@ public record SetPhotoRequest(Guid? FileId);
 /// follow_up_price: 0 = مراجعة مجانية. online_deposit_amount: 0 = لا عربون. allow_extra: false = «ممنوع الإضافي».
 /// </summary>
 public record DoctorSettingsDto(bool AllowExtra, short? LateGraceMinutes, short? FollowUpDays, long? FollowUpPrice, long? OnlineDepositAmount,
-    long BranchLateGraceMinutes, long BranchFollowUpDays, long BranchOnlineDepositAmount);
-public record PutDoctorSettingsRequest(bool? AllowExtra, short? LateGraceMinutes, short? FollowUpDays, long? FollowUpPrice, long? OnlineDepositAmount);
+    long BranchLateGraceMinutes, long BranchFollowUpDays, long BranchOnlineDepositAmount)
+{
+    /// <summary>مدة العودة المجانية بالنتائج للطبيب (null = العيادة ثم الفرع)، والقيمة الفعلية المطبقة.</summary>
+    public short? FreeReturnDays { get; init; }
+    public int EffectiveFreeReturnDays { get; init; }
+}
+/// <summary>free_return_days: يُستبدل مثل باقي الحقول (null = العيادة ثم إعداد الفرع).</summary>
+public record PutDoctorSettingsRequest(bool? AllowExtra, short? LateGraceMinutes, short? FollowUpDays, long? FollowUpPrice, long? OnlineDepositAmount,
+    short? FreeReturnDays = null);
 
 public record CommissionRateDto(decimal NewVisitRate, decimal FollowUpRate, DateOnly EffectiveFrom, DateTimeOffset CreatedAt);
 

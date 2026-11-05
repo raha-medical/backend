@@ -69,6 +69,24 @@ public class ScheduledJobs(IAppDbContext db, IClock clock, NotificationService n
                 .ToListAsync(ct);
             var touched = false;
             if (ended && s.RegistrationClosedAt is null) { s.RegistrationClosedAt = now; touched = true; }
+            if (ended)
+            {
+                // 1.2-ج6: أُغلقت الوجبة وهو بانتظار قسم → ينتهي الدور وتبقى له عودة مجانية بالنتائج (الطبيب ثم العيادة ثم الفرع، 7 أيام)
+                var awaiting = await db.QueueTickets.Where(t => t.SessionId == s.SessionId && t.Status == TicketStatuses.AwaitingResults).ToListAsync(ct);
+                if (awaiting.Count > 0)
+                {
+                    var days = await engine.FreeReturnDaysAsync(s.DoctorId, ct);
+                    foreach (var t in awaiting)
+                    {
+                        t.Status = TicketStatuses.Completed;
+                        t.CompletedAt = now;
+                        t.FreeReturnUntil = days > 0 ? now.AddDays(days) : null;
+                        if (t.BookingId is { } ab) (await db.Bookings.FirstAsync(b => b.BookingId == ab, ct)).Status = BookingStatuses.Completed;
+                    }
+                    touched = true;
+                    changed += awaiting.Count;
+                }
+            }
             if (tickets.Count == 0 && !touched) continue;
 
             var doctor = await db.Doctors.AsNoTracking().FirstAsync(d => d.DoctorId == s.DoctorId, ct);

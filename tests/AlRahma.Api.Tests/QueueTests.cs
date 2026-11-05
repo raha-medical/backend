@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Http.Connections;
 using Microsoft.AspNetCore.SignalR.Client;
 using Xunit;
@@ -348,4 +349,224 @@ public class QueueTests(TestApp app)
             .Build();
 
     private sealed class JsonElementWrapper;
+
+    // ------------------------------------------------------------------ العائد بالنتائج (التدقيق 1.2، 1.3-د، 2.3-ج)
+
+    private async Task<(Guid Lab, Guid Ultrasound)> DiagnosticServicesAsync()
+    {
+        var radClinic = Guid.NewGuid();
+        var lab = Guid.NewGuid();
+        var us = Guid.NewGuid();
+        await app.ExecAsync($"""
+            INSERT INTO clinics (clinic_id, branch_id, name, department) VALUES ('{radClinic}', '{app.Branch1}', 'الأشعة {radClinic.ToString()[..4]}', 'radiology');
+            INSERT INTO services (service_id, branch_id, clinic_id, name, type, price) VALUES ('{lab}', '{app.Branch1}', '{app.LabBranch1}', 'CBC {lab.ToString()[..4]}', 'lab', 30000);
+            INSERT INTO services (service_id, branch_id, clinic_id, name, type, modality, price) VALUES ('{us}', '{app.Branch1}', '{radClinic}', 'سونار {us.ToString()[..4]}', 'radiology', 'ultrasound', 40000);
+            """);
+        return (lab, us);
+    }
+
+    /// <summary>مراجع مباشر مدفوع: يدخل للطبيب ويُنهي المعاينة بطلبات (بلا طلبات = إنهاء عادي).</summary>
+    private async Task<JsonNode> VisitWithOrdersAsync(ClinicSetup s, Guid patient, Guid[] lab, Guid[] radiology)
+    {
+        var ci = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = patient, doctor_id = s.DoctorId }, Guid.NewGuid());
+        Assert.True(ci.Status == 201, ci.Raw);
+        await MarkPaidAsync(ci.Body!);
+        var ticket = ci.Body!["ticket_id"]!.GetValue<Guid>();
+        Assert.Equal(200, (await Api.PostAsync(s.Reception, $"/api/v1/queue/tickets/{ticket}/call")).Status);
+        Assert.Equal(200, (await Api.PostAsync(s.Doctor, $"/api/v1/queue/tickets/{ticket}/start")).Status);
+        var consult = await Api.PostAsync(s.Doctor, "/api/v1/consultations", new
+        {
+            ticket_id = ticket, diagnosis = "فحص",
+            lab_orders = lab.Select(id => new { service_id = id }).ToArray(),
+            radiology_orders = radiology.Select(id => new { service_id = id }).ToArray(),
+            finish_visit = true, call_next = false,
+        }, Guid.NewGuid());
+        Assert.True(consult.Status == 201, consult.Raw);
+        return ci.Body!;
+    }
+
+    private async Task<JsonNode> LiveItemAsync(ClinicSetup s, Guid ticket) =>
+        (await Api.GetAsync(s.Reception, $"/api/v1/queue/live?doctor_id={s.DoctorId}")).Body!["items"]!.AsArray()
+        .First(i => i!["ticket_id"]!.GetValue<Guid>() == ticket)!;
+
+    [SkippableFact]
+    public async Task Finish_with_lab_referral_awaits_results_then_returns_after_emergency_without_new_invoice()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var s = await SetupAsync();
+        var (lab, _) = await DiagnosticServicesAsync();
+        var returning = await PatientAsync(s.Reception, "عائد بالنتائج");
+        var first = await VisitWithOrdersAsync(s, returning, [lab], []);
+        var ticket = first["ticket_id"]!.GetValue<Guid>();
+
+        // إنهاء المعاينة مع تحويل مختبر: بانتظار قسم، خارج الترتيب، والكشفية نُفذت مرة واحدة
+        var awaiting = await LiveItemAsync(s, ticket);
+        Assert.Equal("awaiting_results", awaiting["status"]!.GetValue<string>());
+        Assert.Equal("awaiting_results", awaiting["display_state"]!.GetValue<string>());
+        Assert.Equal("بانتظار المختبر", awaiting["display_state_ar"]!.GetValue<string>());
+        Assert.Null(awaiting["queue_position"]);
+        Assert.False(await app.ScalarAsync<bool>($"SELECT performed_at IS NULL FROM invoice_items WHERE ticket_id = '{ticket}'"));
+
+        // مباشران مدفوعان ثم طوارئ غير مدفوع
+        var others = new List<Guid>();
+        for (var i = 0; i < 2; i++)
+        {
+            var ci = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = await PatientAsync(s.Reception, $"مباشر {i}"), doctor_id = s.DoctorId }, Guid.NewGuid());
+            await MarkPaidAsync(ci.Body!);
+            others.Add(ci.Body!["ticket_id"]!.GetValue<Guid>());
+        }
+        var em = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = await PatientAsync(s.Reception, "طوارئ"), doctor_id = s.DoctorId }, Guid.NewGuid());
+        var emergency = em.Body!["ticket_id"]!.GetValue<Guid>();
+        Assert.Equal(200, (await Api.PostAsync(s.Reception, $"/api/v1/queue/tickets/{emergency}/emergency", new { reason = "نزيف" })).Status);
+
+        // عاد بالنتائج: نفس الرقم، لا فاتورة جديدة، لا مبلغ مطلوب
+        var back = await Api.PostAsync(s.Reception, $"/api/v1/queue/tickets/{ticket}/returned", new { });
+        Assert.True(back.Status == 200, back.Raw);
+        Assert.Equal(first["ticket_number"]!.GetValue<string>(), back.Body!["ticket_number"]!.GetValue<string>());
+        Assert.Equal("arrived", back.Body!["status"]!.GetValue<string>());
+        Assert.Equal(0, back.Body!["amount_due"]!.GetValue<long>());
+        Assert.Equal(1L, await app.ScalarAsync<long>($"SELECT count(*) FROM invoice_items WHERE ticket_id = '{ticket}'"));
+        Assert.Equal("returning", await app.ScalarAsync<string>($"SELECT priority FROM queue_tickets WHERE ticket_id = '{ticket}'"));
+
+        // الترتيب: الطوارئ ثم العائد ثم المباشرون
+        var order = (await Api.GetAsync(s.Reception, $"/api/v1/queue/live?doctor_id={s.DoctorId}")).Body!["items"]!.AsArray()
+            .Where(i => i!["queue_position"] is not null).OrderBy(i => i!["queue_position"]!.GetValue<int>())
+            .Select(i => i!["ticket_id"]!.GetValue<Guid>()).ToList();
+        Assert.Equal([emergency, ticket, others[0], others[1]], order);
+        Assert.Equal("عائد بالنتائج", (await LiveItemAsync(s, ticket))["display_state_ar"]!.GetValue<string>());
+
+        // الاستدعاء: الطوارئ أولاً ثم العائد بلا فحص دفع
+        Assert.Equal(emergency, (await Api.PostAsync(s.Reception, $"/api/v1/queue/call-next?doctor_id={s.DoctorId}")).Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.Equal(200, (await Api.PostAsync(s.Doctor, $"/api/v1/queue/tickets/{emergency}/start")).Status);
+        Assert.Equal(200, (await Api.PostAsync(s.Doctor, $"/api/v1/queue/tickets/{emergency}/complete", new { call_next = false })).Status);
+        Assert.Equal(ticket, (await Api.PostAsync(s.Reception, $"/api/v1/queue/call-next?doctor_id={s.DoctorId}")).Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.Equal(200, (await Api.PostAsync(s.Doctor, $"/api/v1/queue/tickets/{ticket}/start")).Status);
+
+        // المعاينة الثانية على نفس الاستشارة تُنهي نهائياً
+        var consultation = await app.ScalarAsync<Guid>($"SELECT consultation_id FROM consultations WHERE ticket_id = '{ticket}'");
+        var finish = await Api.PatchAsync(s.Doctor, $"/api/v1/consultations/{consultation}", new { clinical_notes = "النتيجة طبيعية", finish_visit = true, call_next = false });
+        Assert.True(finish.Status == 200, finish.Raw);
+        Assert.Equal("completed", finish.Body!["queue"]!["status"]!.GetValue<string>());
+        Assert.Equal(1L, await app.ScalarAsync<long>($"SELECT count(*) FROM queue_tickets WHERE patient_id = '{returning}'"));
+    }
+
+    [SkippableFact]
+    public async Task Check_in_of_awaiting_patient_requires_return_or_new_choice_and_is_audited()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var s = await SetupAsync();
+        var (lab, _) = await DiagnosticServicesAsync();
+
+        var p1 = await PatientAsync(s.Reception, "يختار العودة");
+        var t1 = (await VisitWithOrdersAsync(s, p1, [lab], []))["ticket_id"]!.GetValue<Guid>();
+        var ask = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = p1, doctor_id = s.DoctorId }, Guid.NewGuid());
+        Assert.Equal(409, ask.Status);
+        Assert.Equal("RETURN_OR_NEW_REQUIRED", ask.Code);
+        Assert.Equal(t1, ask.Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.Equal("return", ask.Body!["default"]!.GetValue<string>());
+        Assert.True(ask.Body!["same_ticket"]!.GetValue<bool>());
+        Assert.Equal(400, (await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = p1, doctor_id = s.DoctorId, visit_mode = "x" }, Guid.NewGuid())).Status);
+
+        var ret = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = p1, doctor_id = s.DoctorId, visit_mode = "return" }, Guid.NewGuid());
+        Assert.True(ret.Status == 201, ret.Raw);
+        Assert.Equal(t1, ret.Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.Equal(0, ret.Body!["amount_due"]!.GetValue<long>());
+        var log = await app.ScalarAsync<string>($"SELECT after::text FROM audit_logs WHERE action = 'TICKET_RETURNED_WITH_RESULTS' AND entity_id = '{t1}'");
+        Assert.Contains("\"staff_user_id\"", log);
+        Assert.Contains("\"staff_name\"", log);
+        Assert.Contains("return_same_ticket", log);
+
+        // زيارة جديدة بدل العودة: دور وفاتورة جديدان، والقرار مسجل
+        var p2 = await PatientAsync(s.Reception, "يختار زيارة جديدة");
+        var t2 = (await VisitWithOrdersAsync(s, p2, [lab], []))["ticket_id"]!.GetValue<Guid>();
+        var fresh = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = p2, doctor_id = s.DoctorId, visit_mode = "new" }, Guid.NewGuid());
+        Assert.True(fresh.Status == 201, fresh.Raw);
+        Assert.NotEqual(t2, fresh.Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.True(fresh.Body!["amount_due"]!.GetValue<long>() > 0);
+        var newLog = await app.ScalarAsync<string>($"SELECT after::text FROM audit_logs WHERE action = 'VISIT_NEW_INSTEAD_OF_RETURN' AND entity_id = '{fresh.Body!["ticket_id"]}'");
+        Assert.Contains(t2.ToString(), newLog);
+    }
+
+    [SkippableFact]
+    public async Task Session_close_turns_awaiting_into_free_return_and_next_day_return_is_free_and_linked()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var s = await SetupAsync();
+        var (lab, _) = await DiagnosticServicesAsync();
+        await app.ExecAsync($"UPDATE clinics SET free_return_days = 3 WHERE clinic_id = '{s.ClinicId}'");
+        var patient = await PatientAsync(s.Reception, "يعود غداً");
+        var first = await VisitWithOrdersAsync(s, patient, [lab], []);
+        var original = first["ticket_id"]!.GetValue<Guid>();
+
+        // انتهت الوجبة (أمس) وهو بانتظار المختبر: مهمة الإغلاق تنهي الدور وتعطيه عودة مجانية بمدة العيادة
+        await app.ExecAsync($"UPDATE doctor_sessions SET session_date = session_date - 1, end_time = '01:00', extended_end_time = NULL, status = 'open' WHERE session_id = (SELECT session_id FROM queue_tickets WHERE ticket_id = '{original}')");
+        using (var scope = app.Server.Services.CreateScope())
+            await scope.ServiceProvider.GetRequiredService<AlRahma.Application.Notifications.ScheduledJobs>().AutoNoShowAsync(default);
+        Assert.Equal("completed", await app.ScalarAsync<string>($"SELECT status FROM queue_tickets WHERE ticket_id = '{original}'"));
+        var days = await app.ScalarAsync<double>($"SELECT (extract(epoch FROM free_return_until - now()) / 86400)::float8 FROM queue_tickets WHERE ticket_id = '{original}'");
+        Assert.InRange(days, 2.9, 3.1);
+
+        var ask = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = patient, doctor_id = s.DoctorId }, Guid.NewGuid());
+        Assert.Equal("RETURN_OR_NEW_REQUIRED", ask.Code);
+        Assert.False(ask.Body!["same_ticket"]!.GetValue<bool>());
+
+        var ret = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = patient, doctor_id = s.DoctorId, visit_mode = "return" }, Guid.NewGuid());
+        Assert.True(ret.Status == 201, ret.Raw);
+        var again = ret.Body!["ticket_id"]!.GetValue<Guid>();
+        Assert.NotEqual(original, again);
+        Assert.Equal(0, ret.Body!["amount_due"]!.GetValue<long>());
+        Assert.Equal("paid", ret.Body!["payment_status"]!.GetValue<string>());
+        Assert.Equal(original, await app.ScalarAsync<Guid>($"SELECT original_ticket_id FROM queue_tickets WHERE ticket_id = '{again}'"));
+        Assert.Equal("returning", await app.ScalarAsync<string>($"SELECT priority FROM queue_tickets WHERE ticket_id = '{again}'"));
+        Assert.Contains(original.ToString(), await app.ScalarAsync<string>($"SELECT after::text FROM audit_logs WHERE action = 'TICKET_RETURN_NEW_SESSION' AND entity_id = '{again}'"));
+        // العودة المجانية تُستخدم مرة واحدة
+        Assert.Equal("ALREADY_IN_QUEUE", (await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = patient, doctor_id = s.DoctorId }, Guid.NewGuid())).Code);
+    }
+
+    [SkippableFact]
+    public async Task Multiple_referrals_show_each_department_until_ready_and_external_results_close_the_rest()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var s = await SetupAsync();
+        var (lab, us) = await DiagnosticServicesAsync();
+        var patient = await PatientAsync(s.Reception, "مختبر وسونار");
+        var ticket = (await VisitWithOrdersAsync(s, patient, [lab], [us]))["ticket_id"]!.GetValue<Guid>();
+        Assert.Equal("بانتظار المختبر والسونار", (await LiveItemAsync(s, ticket))["display_state_ar"]!.GetValue<string>());
+
+        string Referral(string service) => $"SELECT r.referral_id FROM referrals r JOIN medical_orders m ON m.order_item_id = r.order_item_id JOIN consultations c ON c.consultation_id = m.consultation_id WHERE c.ticket_id = '{ticket}' AND r.service = '{service}'";
+        await app.ExecAsync($"UPDATE referrals SET status = 'completed', completed_at = now() WHERE referral_id = ({Referral("lab")})");
+        var item = await LiveItemAsync(s, ticket);
+        Assert.Equal("بانتظار السونار", item["display_state_ar"]!.GetValue<string>());
+        Assert.Equal(["ultrasound"], item["awaiting_services"]!.AsArray().Select(x => x!.GetValue<string>()).ToList());
+
+        // نتيجة السونار من خارج المجمع: يعود ويُعلَّم المتبقي خارجياً
+        var back = await Api.PostAsync(s.Reception, $"/api/v1/queue/tickets/{ticket}/returned", new { external = true });
+        Assert.True(back.Status == 200, back.Raw);
+        Assert.Equal("external", await app.ScalarAsync<string>($"SELECT status FROM referrals WHERE referral_id = ({Referral("ultrasound")})"));
+
+        // تحويلان آخران يكتملان → «جاهز للعودة»
+        var p2 = await PatientAsync(s.Reception, "جاهز للعودة");
+        var t2 = (await VisitWithOrdersAsync(s, p2, [lab], [us]))["ticket_id"]!.GetValue<Guid>();
+        await app.ExecAsync($"""
+            UPDATE referrals SET status = 'completed', completed_at = now() WHERE referral_id IN (
+              SELECT r.referral_id FROM referrals r JOIN medical_orders m ON m.order_item_id = r.order_item_id
+              JOIN consultations c ON c.consultation_id = m.consultation_id WHERE c.ticket_id = '{t2}');
+            """);
+        var ready = await LiveItemAsync(s, t2);
+        Assert.Equal("ready_to_return", ready["display_state"]!.GetValue<string>());
+        Assert.Equal("جاهز للعودة", ready["display_state_ar"]!.GetValue<string>());
+
+        // expect_return=false: إنهاء نهائي رغم التحويل
+        var p3 = await PatientAsync(s.Reception, "لا يعود");
+        var ci = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { patient_id = p3, doctor_id = s.DoctorId }, Guid.NewGuid());
+        await MarkPaidAsync(ci.Body!);
+        var t3 = ci.Body!["ticket_id"]!.GetValue<Guid>();
+        await Api.PostAsync(s.Reception, $"/api/v1/queue/tickets/{t3}/call");
+        await Api.PostAsync(s.Doctor, $"/api/v1/queue/tickets/{t3}/start");
+        var c3 = await Api.PostAsync(s.Doctor, "/api/v1/consultations", new
+        {
+            ticket_id = t3, diagnosis = "x", lab_orders = new[] { new { service_id = lab } }, finish_visit = true, call_next = false, expect_return = false,
+        }, Guid.NewGuid());
+        Assert.Equal("completed", c3.Body!["queue"]!["status"]!.GetValue<string>());
+    }
 }

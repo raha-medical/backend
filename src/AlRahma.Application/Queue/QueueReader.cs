@@ -18,6 +18,15 @@ public record QueueItemDto(Guid TicketId, string TicketNumber, Guid PatientId, s
     public int? OnTheWayEtaMinutes { get; init; }
     /// <summary>مراجع «إضافي» فوق السعة.</summary>
     public bool IsExtra { get; init; }
+    /// <summary>حالة العرض: awaiting_results | ready_to_return | returning | awaiting_payment (حاضر — بانتظار الدفع) | null.</summary>
+    public string? DisplayState { get; init; }
+    /// <summary>نص الشارة: «بانتظار المختبر والأشعة» / «جاهز للعودة» / «عائد بالنتائج» / «حاضر — بانتظار الدفع».</summary>
+    public string? DisplayStateAr { get; init; }
+    /// <summary>الأقسام التي ينتظرها (lab | radiology | ultrasound | pharmacy).</summary>
+    public IReadOnlyList<string>? AwaitingServices { get; init; }
+    public DateTimeOffset? AwaitingSince { get; init; }
+    public DateTimeOffset? ReturnedAt { get; init; }
+    public Guid? OriginalTicketId { get; init; }
 }
 
 public record LiveQueueDto(Guid SessionId, Guid DoctorId, string DoctorName, Guid ClinicId, string ClinicName, DateOnly Date,
@@ -61,6 +70,24 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             .Where(i => i.TicketId != null && ticketIds.Contains(i.TicketId.Value) && i.Status != InvoiceItemStatuses.Void)
             .ToListAsync(ct);
         var byTicket = items.GroupBy(i => i.TicketId!.Value).ToDictionary(g => g.Key, g => g.OrderByDescending(i => i.CreatedAt).First());
+        var awaitingIds = tickets.Where(t => t.Status == TicketStatuses.AwaitingResults).Select(t => t.TicketId).ToList();
+        var visitReferrals = await engine.VisitReferralsAsync(awaitingIds, ct);
+        (string? State, string? Ar, IReadOnlyList<string>? Services) Display(QueueTicket t, InvoiceItem? item)
+        {
+            if (t.Status == TicketStatuses.AwaitingResults)
+            {
+                var st = QueueEngine.AwaitingState(visitReferrals[t.TicketId]);
+                return st.Ready
+                    ? ("ready_to_return", "جاهز للعودة", [])
+                    : ("awaiting_results", "بانتظار " + string.Join(" و", st.Pending.Select(QueueEngine.ServiceAr)), st.Pending);
+            }
+            if (t.Status is not (TicketStatuses.Arrived or TicketStatuses.Called)) return (null, null, null);
+            if (t.Priority == TicketPriorities.Returning) return ("returning", "عائد بالنتائج", null);
+            if (t.Status == TicketStatuses.Arrived && t.Priority != TicketPriorities.Emergency
+                && QueueEngine.PaymentStatusOf(item) is not ("paid" or "deferred"))
+                return ("awaiting_payment", "حاضر — بانتظار الدفع", null);
+            return (null, null, null);
+        }
 
         var ordered = QueueEngine.Ordered(tickets);
         var rank = ordered.Select((t, i) => (t.TicketId, i)).ToDictionary(x => x.TicketId, x => x.i);
@@ -88,12 +115,15 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             sorted.Select(t =>
             {
                 byTicket.TryGetValue(t.TicketId, out var item);
+                var display = Display(t, item);
                 return new QueueItemDto(t.TicketId, t.TicketNumber, t.PatientId, t.Patient!.FullName, t.BookingId, t.Source, t.Priority,
                     t.Status, QueueEngine.PaymentStatusOf(item), item?.InvoiceId, t.QueuePosition, t.EstimatedTime,
                     t.ArrivedAt, t.CalledAt, t.StartedAt, t.CompletedAt)
                 {
                     CallAcknowledgedAt = t.CallAcknowledgedAt, CallAlertsSent = t.CallAlertsSent,
                     OnTheWayAt = t.OnTheWayAt, OnTheWayEtaMinutes = t.OnTheWayEtaMinutes, IsExtra = t.IsExtra,
+                    DisplayState = display.State, DisplayStateAr = display.Ar, AwaitingServices = display.Services,
+                    AwaitingSince = t.AwaitingSince, ReturnedAt = t.ReturnedAt, OriginalTicketId = t.OriginalTicketId,
                 };
             }).ToList())
         {

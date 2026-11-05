@@ -62,6 +62,8 @@ public class Clinic
     public short? Floor { get; set; }
     public bool IsActive { get; set; } = true;
     public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>مدة العودة المجانية بالنتائج لأطباء العيادة؛ null = إعداد الفرع queue.free_return_days (ترحيل 018).</summary>
+    public short? FreeReturnDays { get; set; }
 
     public Branch? Branch { get; set; }
 }

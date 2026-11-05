@@ -11,11 +11,12 @@ namespace AlRahma.Application.Clinical;
 public record PrescriptionLineInput(string? DrugName, string? Dose, string? Frequency, short? DurationDays, string? Instructions);
 public record CreateConsultationRequest(Guid? ConsultationId, Guid? TicketId, string? Diagnosis, string? Icd10Code, string? ClinicalNotes,
     string? PrivateNotes, List<PrescriptionLineInput>? Prescription, List<OrderLineInput>? LabOrders, List<OrderLineInput>? RadiologyOrders,
-    short? FollowUpAfterDays, bool? FinishVisit = null, bool? CallNext = null);
+    short? FollowUpAfterDays, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null);
+/// <param name="ExpectReturn">مع finish_visit: هل يعود المراجع بالنتائج؟ null = تلقائياً من التحويلات (انظر CompleteTicketRequest).</param>
 /// <param name="FinishVisit">"حفظ وإنهاء": يحفظ ثم ينهي المعاينة في الطابور (نفس POST /queue/tickets/{id}/complete).</param>
 /// <param name="CallNext">مع finish_visit: استدعاء المريض التالي. null = إعداد الفرع queue.auto_call_next.</param>
 public record UpdateConsultationRequest(string? Diagnosis, string? Icd10Code, string? ClinicalNotes, string? PrivateNotes, short? FollowUpAfterDays,
-    List<PrescriptionLineInput>? Prescription, bool? FinishVisit = null, bool? CallNext = null);
+    List<PrescriptionLineInput>? Prescription, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null);
 public record AddOrdersRequest(List<OrderLineInput>? LabOrders, List<OrderLineInput>? RadiologyOrders);
 public record AddAddendumRequest(string? Text);
 
@@ -104,16 +105,16 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         await db.SaveChangesAsync(ct);
         await sync.SyncAsync(orders.Where(o => o.Status == OrderStatuses.Paid).Select(o => o.InvoiceItemId).ToArray(), ct);
         await referrals.NotifyCreatedAsync(c.PatientId, orders.Select(o => o.OrderItemId).ToArray(), newRx?.PrescriptionId, ct);
-        return await FinishAsync(await GetAsync(id, ct), req.FinishVisit, req.CallNext, ct);
+        return await FinishAsync(await GetAsync(id, ct), req.FinishVisit, req.CallNext, ct, req.ExpectReturn);
     }
 
     /// <summary>"حفظ وإنهاء": ينهي المعاينة في الطابور إذا كان المريض ما زال في الغرفة، ويستدعي التالي حسب call_next أو إعداد الفرع.</summary>
-    private async Task<ConsultationDto> FinishAsync(ConsultationDto dto, bool? finish, bool? callNext, CancellationToken ct)
+    private async Task<ConsultationDto> FinishAsync(ConsultationDto dto, bool? finish, bool? callNext, CancellationToken ct, bool? expectReturn = null)
     {
         if (finish != true) return dto;
         var status = await db.QueueTickets.Where(t => t.TicketId == dto.TicketId).Select(t => t.Status).FirstAsync(ct);
         if (status != TicketStatuses.InRoom) return dto;
-        return dto with { Queue = await queue.CompleteAsync(dto.TicketId, new Queue.CompleteTicketRequest(callNext), ct) };
+        return dto with { Queue = await queue.CompleteAsync(dto.TicketId, new Queue.CompleteTicketRequest(callNext, expectReturn), ct) };
     }
 
     public async Task<ConsultationDto> GetAsync(Guid consultationId, CancellationToken ct)
@@ -166,7 +167,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         audit.Add("CONSULTATION_UPDATED", "consultation", c.ConsultationId, before: before,
             after: new { c.Diagnosis, c.Icd10Code, c.ClinicalNotes, c.FollowUpAfterDays, prescription_lines = req.Prescription?.Count });
         await db.SaveChangesAsync(ct);
-        return await FinishAsync(await GetAsync(c.ConsultationId, ct), req.FinishVisit, req.CallNext, ct);
+        return await FinishAsync(await GetAsync(c.ConsultationId, ct), req.FinishVisit, req.CallNext, ct, req.ExpectReturn);
     }
 
     public async Task<ConsultationDto> AddOrdersAsync(Guid consultationId, AddOrdersRequest req, CancellationToken ct)

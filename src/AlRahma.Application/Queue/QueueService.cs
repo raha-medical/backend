@@ -9,8 +9,14 @@ using Microsoft.EntityFrameworkCore;
 namespace AlRahma.Application.Queue;
 
 /// <summary>`allow_extra`: تأكيد الاستقبال لقبول المراجع «إضافي» فوق السعة بعد رد 409 SESSION_FULL_EXTRA_POSSIBLE.</summary>
+/// <summary>
+/// `visit_mode` (التدقيق 1.2، قرار المالك): للمراجع الذي ينتظر نتائج الطبيب نفسه أو له عودة مجانية صالحة،
+/// يجب اختيار "return" (عودة بالنتائج، بلا فاتورة) أو "new" (زيارة جديدة). بدونه يرد 409 RETURN_OR_NEW_REQUIRED.
+/// </summary>
 public record CheckInRequest(Guid? TicketId, Guid? BookingId, string? BookingQr, Guid? PatientId, Guid? DoctorId, string? VisitKind,
-    DateTimeOffset? CreatedOfflineAt, bool? AllowExtra = null);
+    DateTimeOffset? CreatedOfflineAt, bool? AllowExtra = null, string? VisitMode = null);
+/// <summary>external = نتائج الأقسام المتبقية من خارج المجمع: تُعلَّم تحويلاتها «خارجي».</summary>
+public record ReturnedRequest(bool? External);
 public record CheckInResponse(Guid TicketId, string TicketNumber, string Status, short? QueuePosition, DateTimeOffset? EstimatedTime,
     Guid InvoiceId, string VisitKind, long AmountDue, string PaymentStatus, bool IsExtra = false)
 {
@@ -31,8 +37,10 @@ public record TicketActionResponse(Guid TicketId, string TicketNumber, string St
     /// <summary>في الإنهاء فقط: المريض التالي الذي استُدعي تلقائياً (أو null).</summary>
     public TicketActionResponse? NextTicket { get; init; }
 }
-/// <summary>call_next: استدعاء التالي تلقائياً بعد الإنهاء. null = إعداد الفرع queue.auto_call_next.</summary>
-public record CompleteTicketRequest(bool? CallNext);
+/// <summary>call_next: استدعاء التالي تلقائياً بعد الإنهاء. null = إعداد الفرع queue.auto_call_next.
+/// expect_return: هل يعود المراجع بالنتائج؟ null = تلقائياً (للزيارة تحويل مختبر/أشعة/سونار غير مكتمل)،
+/// true = «بانتظار قسم» حتى لو كان التحويل للصيدلية فقط، false = إنهاء نهائي.</summary>
+public record CompleteTicketRequest(bool? CallNext, bool? ExpectReturn = null);
 public record NoShowRequest(string? Mode);
 public record NoShowResponse(Guid TicketId, string Status, bool QueueRecalculated, bool CountedAsNoShow, bool PatientBanned);
 public record EmergencyRequest(string? Reason);
@@ -281,6 +289,27 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (patient.MergedIntoPatientId is not null)
             throw new AppException(409, "PATIENT_MERGED", "هذا الملف مدموج في ملف آخر");
 
+        // 1.2 (قرار المالك): المراجع ينتظر نتائج هذا الطبيب أو له عودة مجانية صالحة → الاستقبال يختار «عودة بالنتائج» أو «زيارة جديدة»
+        var visitMode = req.VisitMode?.Trim().ToLowerInvariant();
+        new Validator().Check(visitMode is null or "return" or "new", "visit_mode", "return أو new").ThrowIfInvalid();
+        var prior = op.IsOffline ? null : await ReturnCandidateAsync(patient.PatientId, doctor.DoctorId, ct);
+        if (prior is not null && visitMode is null) throw await ReturnOrNewRequiredAsync(prior, ct);
+        if (visitMode == "return" && prior is null)
+            throw new AppException(409, "NO_RETURN_AVAILABLE", "لا توجد عودة بالنتائج لهذا المراجع عند هذا الطبيب", "سجّله زيارة جديدة");
+        if (visitMode == "return" && prior!.Status == TicketStatuses.AwaitingResults && prior.Session!.SessionDate == op.Today)
+        {
+            // نفس اليوم: نفس الدور ونفس الكشفية، بلا فاتورة ولا رقم جديد
+            await using var rtx = await db.BeginTransactionAsync(ct);
+            await engine.LockSessionAsync(prior.SessionId, ct);
+            // بعد القفل: ضغطة متزامنة ربما أعادته للتو
+            if (await db.QueueTickets.AsNoTracking().Where(t => t.TicketId == prior.TicketId).Select(t => t.Status).FirstAsync(ct) != TicketStatuses.AwaitingResults)
+                throw new AppException(409, "ALREADY_IN_QUEUE", "المريض في الطابور مسبقاً");
+            var returned = await ReturnSameTicketAsync(prior, prior.Session!, false, "check_in", ct);
+            if (rtx is not null) await rtx.CommitAsync(ct);
+            return returned;
+        }
+        var returnNew = visitMode == "return"; // يوم أو وجبة أخرى: دور جديد بكشفية مجانية مربوط بالأصلي
+
         // C2: الأوفلاين يُطبق بوقت حدوثه (op.Today/op.Now) لا بوقت المزامنة
         var today = op.Today;
         if (!op.IsOffline) await closures.EnsureOpenAsync(doctor.ClinicId, today, ct);
@@ -318,12 +347,19 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                                                 && TicketStatuses.Active.Contains(t.Status), ct))
             throw new AppException(409, "ALREADY_IN_QUEUE", "المريض في الطابور مسبقاً");
 
-        if (session.RegistrationClosedAt is not null && !op.IsOffline)
+        // العائد بالنتائج حقه قائم: لا يُمنع بإغلاق التسجيل ولا بالسعة
+        if (session.RegistrationClosedAt is not null && !op.IsOffline && !returnNew)
             throw new AppException(409, "REGISTRATION_CLOSED", "أُغلق التسجيل لهذه الوجبة", "يمكن فتحه من شاشة الطابور");
-        var isExtra = await CapacityCheckAsync(session, doctor, req.AllowExtra == true, now, ct);
+        var isExtra = !returnNew && await CapacityCheckAsync(session, doctor, req.AllowExtra == true, now, ct);
 
-        var visitKind = await engine.ResolveVisitKindAsync(req.VisitKind, patient.PatientId, doctor.DoctorId, today, staffMayOverride: true, ct);
-        var service = await engine.ConsultationServiceAsync(session.ClinicId, visitKind, ct);
+        var visitKind = returnNew ? VisitKinds.FollowUp
+            : await engine.ResolveVisitKindAsync(req.VisitKind, patient.PatientId, doctor.DoctorId, today, staffMayOverride: true, ct);
+        Service service;
+        try { service = await engine.ConsultationServiceAsync(session.ClinicId, visitKind, ct); }
+        catch (AppException e) when (returnNew && e.Code == "SERVICE_NOT_CONFIGURED")
+        {
+            service = await engine.ConsultationServiceAsync(session.ClinicId, VisitKinds.NewVisit, ct); // العودة مجانية: أي كشفية للعيادة
+        }
         var sequence = await engine.NextSequenceAsync(session.SessionId, ct);
         var ticket = new QueueTicket
         {
@@ -344,9 +380,28 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             IsExtra = isExtra,
             ExtraApprovedBy = isExtra ? current.UserId : null,
         };
+        if (returnNew)
+        {
+            ticket.Priority = TicketPriorities.Returning;
+            ticket.ReturnedAt = now;
+            ticket.OriginalTicketId = prior!.TicketId;
+        }
         db.QueueTickets.Add(ticket);
-        var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, visitKind, QueueEngine.ConsultationPrice(doctor, service, visitKind), alreadyPaid: false, ct);
+        var price = returnNew ? 0 : QueueEngine.ConsultationPrice(doctor, service, visitKind);
+        var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, visitKind, price, alreadyPaid: false, ct);
         audit.Add("CHECKED_IN", "queue_ticket", ticket.TicketId, after: new { source = "walk_in", invoice.InvoiceNumber, is_extra = isExtra, offline = op.IsOffline });
+        if (prior is not null)
+        {
+            if (returnNew && prior.Status == TicketStatuses.AwaitingResults)
+            {
+                // انتظار من يوم سابق لم يُغلق بعد: العودة تُنهيه
+                prior.Status = TicketStatuses.Completed;
+                prior.CompletedAt = now;
+                if (prior.BookingId is { } pb) (await db.Bookings.FirstAsync(b => b.BookingId == pb, ct)).Status = BookingStatuses.Completed;
+            }
+            audit.Add(returnNew ? "TICKET_RETURN_NEW_SESSION" : "VISIT_NEW_INSTEAD_OF_RETURN", "queue_ticket", ticket.TicketId,
+                after: await ConversionLogAsync(returnNew ? "return_new_session" : "new_visit", ticket, prior, now, ct));
+        }
         await db.SaveChangesAsync(ct);
         await engine.RecalculateAsync(session, ct);
         if (tx is not null) await tx.CommitAsync(ct);
@@ -556,10 +611,10 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         // الترتيب يعتمد على الوقت (موعد المحجوز يحين): يُعاد حسابه قبل اختيار التالي
         await engine.RecalculateAsync(session, ct);
         var tickets = await db.QueueTickets.Where(t => t.SessionId == session.SessionId).ToListAsync(ct);
-        var paidIds = await PaidTicketIdsAsync(tickets.Select(t => t.TicketId).ToList(), ct);
+        var paidIds = await engine.PaidTicketIdsAsync(tickets.Select(t => t.TicketId).ToList(), ct);
         var next = QueueEngine.Ordered(tickets)
                        .FirstOrDefault(t => t.Status == TicketStatuses.Arrived
-                                            && (t.Priority == TicketPriorities.Emergency || paidIds.Contains(t.TicketId)))
+                                            && (t.Priority is TicketPriorities.Emergency or TicketPriorities.Returning || paidIds.Contains(t.TicketId)))
                    ?? throw new AppException(404, "QUEUE_EMPTY", "لا يوجد مريض جاهز (واصل ومدفوع) في الانتظار");
         return await CallCoreAsync(next.TicketId, ct);
     }
@@ -601,15 +656,33 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (req?.CallNext == true) await EnsureCallAllowedAsync(ticket.BranchId, ct);
         var now = op.Now;
         if (staffFinish) ticket.StartedAt ??= ticket.CalledAt ?? now;
-        ticket.Status = TicketStatuses.Completed;
-        ticket.CompletedAt = now;
-        if (ticket.BookingId is { } bid)
+        // 1.2-أ: للزيارة تحويل لم يكتمل → «بانتظار قسم» (خارج الترتيب، والحجز لا يكتمل). المعاينة الثانية بعد العودة تُنهي نهائياً.
+        var awaiting = req?.ExpectReturn == true;
+        if (req?.ExpectReturn is null && ticket.ReturnedAt is null)
         {
-            var booking = await db.Bookings.FirstAsync(b => b.BookingId == bid, ct);
-            booking.Status = BookingStatuses.Completed;
+            var state = QueueEngine.AwaitingState((await engine.VisitReferralsAsync([ticket.TicketId], ct))[ticket.TicketId]);
+            awaiting = state.HasClinical && !state.Ready;
         }
+        if (awaiting)
+        {
+            ticket.Status = TicketStatuses.AwaitingResults;
+            ticket.AwaitingSince = now;
+            ticket.CompletedAt = null;
+            audit.Add("TICKET_AWAITING_RESULTS", "queue_ticket", ticket.TicketId, after: new { expect_return = req?.ExpectReturn });
+        }
+        else
+        {
+            ticket.Status = TicketStatuses.Completed;
+            ticket.CompletedAt = now;
+            if (ticket.BookingId is { } bid)
+            {
+                var booking = await db.Bookings.FirstAsync(b => b.BookingId == bid, ct);
+                booking.Status = BookingStatuses.Completed;
+            }
+        }
+        // الكشفية نُفذت عند أول إنهاء فقط (العودة بالنتائج على نفس الكشفية)
         var item = await engine.ConsultationItemAsync(ticket.TicketId, ct);
-        if (item is not null) item.PerformedAt = now;
+        if (item is not null) item.PerformedAt ??= now;
         await db.SaveChangesAsync(ct);
         await engine.RecalculateAsync(session, ct);
         await notifier.SessionChangedAsync(session.SessionId, ct);
@@ -743,6 +816,110 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         return ToAction(ticket);
     }
 
+    // ------------------------------------------------------------------ العائد بالنتائج (التدقيق 1.2، 1.3-د)
+
+    /// <summary>
+    /// زر «عاد بالنتائج» على دور «بانتظار قسم» في نفس الوجبة: يعود «واصل» بأولوية returning (بعد الطوارئ)، على نفس الكشفية
+    /// والمعاينة، بلا فاتورة ولا رقم جديد. external = نتائج المتبقي من خارج المجمع.
+    /// </summary>
+    public Task<CheckInResponse> ReturnedAsync(Guid ticketId, ReturnedRequest? req, CancellationToken ct) => LockedAsync(ticketId, async () =>
+    {
+        var (ticket, session, _) = await LoadTicketAsync(ticketId, ct);
+        if (ticket.Status != TicketStatuses.AwaitingResults) throw InvalidTransition(ticket, "العودة بالنتائج");
+        if (session.SessionDate != op.Today)
+            throw new AppException(409, "RETURN_NEEDS_CHECK_IN", "وجبة هذا الدور انتهت", "ثبّت حضوره من «حضور وتسجيل» واختر «عودة بالنتائج»");
+        return await ReturnSameTicketAsync(ticket, session, req?.External == true, "returned_button", ct);
+    }, ct);
+
+    private async Task<CheckInResponse> ReturnSameTicketAsync(QueueTicket ticket, DoctorSession session, bool external, string via, CancellationToken ct)
+    {
+        var now = op.Now;
+        var marked = external ? await MarkRemainingExternalAsync(ticket.TicketId, now, ct) : 0;
+        var before = new { ticket.Status, ticket.Priority, ticket.AwaitingSince };
+        ticket.Status = TicketStatuses.Arrived;
+        ticket.Priority = ticket.Priority == TicketPriorities.Emergency ? ticket.Priority : TicketPriorities.Returning;
+        ticket.ReturnedAt = now;
+        ticket.CalledAt = null;
+        ticket.CallAcknowledgedAt = null;
+        var log = await ConversionLogAsync("return_same_ticket", ticket, null, now, ct);
+        log["via"] = via;
+        log["external_marked"] = marked;
+        audit.Add("TICKET_RETURNED_WITH_RESULTS", "queue_ticket", ticket.TicketId, before: before, after: log);
+        await db.SaveChangesAsync(ct);
+        await engine.RecalculateAsync(session, ct);
+        await notifier.SessionChangedAsync(session.SessionId, ct);
+        var item = await engine.ConsultationItemAsync(ticket.TicketId, ct)
+                   ?? throw new AppException(409, "INVALID_TICKET_STATE", "لا توجد كشفية لهذا الدور");
+        return await ResponseAsync(ticket, item, ct);
+    }
+
+    /// <summary>تحويلات المختبر/الأشعة/السونار المعلقة وغير المدفوعة تصبح «خارجي» (المدفوع يبقى: حقه قائم أو يُسترجع).</summary>
+    private async Task<int> MarkRemainingExternalAsync(Guid ticketId, DateTimeOffset now, CancellationToken ct)
+    {
+        var ids = (await engine.VisitReferralsAsync([ticketId], ct))[ticketId]
+            .Where(r => r.Service != ReferralServices.Pharmacy && r.Status is ReferralStatuses.Referred or ReferralStatuses.Activated or ReferralStatuses.Expired)
+            .Select(r => r.ReferralId).ToList();
+        var rows = await db.Referrals.Where(r => ids.Contains(r.ReferralId)
+            && !(r.OrderItemId != null && db.MedicalOrders.Any(m => m.OrderItemId == r.OrderItemId
+                && db.InvoiceItems.Any(i => i.InvoiceItemId == m.InvoiceItemId && i.Status != InvoiceItemStatuses.Unpaid && i.Status != InvoiceItemStatuses.Void))))
+            .ToListAsync(ct);
+        foreach (var r in rows)
+        {
+            r.Status = ReferralStatuses.External;
+            r.ClosedAt = now;
+            audit.Add("REFERRAL_EXTERNAL", "referral", r.ReferralId, after: new { r.Service, ticket_id = ticketId });
+        }
+        return rows.Count;
+    }
+
+    /// <summary>دور ينتظر نتائج هذا الطبيب، أو آخر دور له عودة مجانية صالحة لم تُستخدم.</summary>
+    private async Task<QueueTicket?> ReturnCandidateAsync(Guid patientId, Guid doctorId, CancellationToken ct)
+    {
+        var awaiting = await db.QueueTickets.Include(t => t.Session)
+            .Where(t => t.PatientId == patientId && t.DoctorId == doctorId && t.Status == TicketStatuses.AwaitingResults)
+            .OrderByDescending(t => t.AwaitingSince).FirstOrDefaultAsync(ct);
+        if (awaiting is not null) return awaiting;
+        var now = op.Now;
+        return await db.QueueTickets.Include(t => t.Session)
+            .Where(t => t.PatientId == patientId && t.DoctorId == doctorId && t.Status == TicketStatuses.Completed
+                        && t.FreeReturnUntil != null && t.FreeReturnUntil > now
+                        && !db.QueueTickets.Any(x => x.OriginalTicketId == t.TicketId && x.Status != TicketStatuses.Cancelled))
+            .OrderByDescending(t => t.FreeReturnUntil).FirstOrDefaultAsync(ct);
+    }
+
+    private async Task<AppException> ReturnOrNewRequiredAsync(QueueTicket prior, CancellationToken ct)
+    {
+        var state = QueueEngine.AwaitingState((await engine.VisitReferralsAsync([prior.TicketId], ct))[prior.TicketId]);
+        var awaiting = prior.Status == TicketStatuses.AwaitingResults;
+        return new AppException(409, "RETURN_OR_NEW_REQUIRED",
+            awaiting ? "المراجع بانتظار نتائج هذا الطبيب" : "للمراجع عودة مجانية بالنتائج عند هذا الطبيب",
+            "اختر «عودة بالنتائج» (visit_mode=return، بلا رسوم) أو «زيارة جديدة» (visit_mode=new)")
+        {
+            Extensions = new Dictionary<string, object?>
+            {
+                ["ticket_id"] = prior.TicketId, ["ticket_number"] = prior.TicketNumber, ["ticket_status"] = prior.Status,
+                ["session_date"] = prior.Session?.SessionDate, ["awaiting_since"] = prior.AwaitingSince, ["free_return_until"] = prior.FreeReturnUntil,
+                ["pending_services"] = state.Pending, ["pending_services_ar"] = state.Pending.Select(QueueEngine.ServiceAr).ToList(),
+                ["ready_to_return"] = state.Ready, ["same_ticket"] = awaiting && prior.Session?.SessionDate == op.Today,
+                ["options"] = new[] { "return", "new" }, ["default"] = "return",
+            },
+        };
+    }
+
+    /// <summary>سجل التحويل إلى عائد أو زيارة جديدة (قرار المالك 3): الموظف ووقت العملية والتذاكر.</summary>
+    private async Task<Dictionary<string, object?>> ConversionLogAsync(string mode, QueueTicket ticket, QueueTicket? original, DateTimeOffset at, CancellationToken ct)
+    {
+        var staff = current.StaffUserId is { } uid
+            ? await db.Users.AsNoTracking().Where(u => u.UserId == uid).Select(u => u.FullName).FirstOrDefaultAsync(ct)
+            : null;
+        return new Dictionary<string, object?>
+        {
+            ["mode"] = mode, ["ticket_id"] = ticket.TicketId, ["ticket_number"] = ticket.TicketNumber,
+            ["original_ticket_id"] = original?.TicketId, ["original_ticket_number"] = original?.TicketNumber,
+            ["staff_user_id"] = current.StaffUserId, ["staff_name"] = staff, ["at"] = at,
+        };
+    }
+
     // ------------------------------------------------------------------ مساعدات
 
     private async Task EnsureInvoiceAsync(QueueTicket ticket, DoctorSession session, CancellationToken ct)
@@ -784,10 +961,10 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         }
     }
 
-    /// <summary>لا يدخل المريض قبل دفع الكشفية، عدا الطوارئ والدفع الآجل المعتمد.</summary>
+    /// <summary>لا يدخل المريض قبل دفع الكشفية، عدا الطوارئ والدفع الآجل المعتمد والعائد بالنتائج (على كشفيته الأولى).</summary>
     private async Task EnsurePaidAsync(QueueTicket ticket, CancellationToken ct)
     {
-        if (ticket.Priority == TicketPriorities.Emergency) return;
+        if (ticket.Priority is TicketPriorities.Emergency or TicketPriorities.Returning) return;
         var item = await engine.ConsultationItemAsync(ticket.TicketId, ct);
         var status = QueueEngine.PaymentStatusOf(item);
         if (status is "paid" or "deferred") return;
@@ -796,12 +973,6 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             Extensions = new Dictionary<string, object?> { ["invoice_id"] = item?.InvoiceId, ["amount_due"] = item?.NetPrice },
         };
     }
-
-    private async Task<HashSet<Guid>> PaidTicketIdsAsync(List<Guid> ticketIds, CancellationToken ct) =>
-        (await db.InvoiceItems.Where(i => i.TicketId != null && ticketIds.Contains(i.TicketId.Value)
-                                          && (i.Status == InvoiceItemStatuses.Paid || i.Status == InvoiceItemStatuses.Deferred
-                                              || i.Status == InvoiceItemStatuses.PartiallyRefunded))
-            .Select(i => i.TicketId!.Value).ToListAsync(ct)).ToHashSet();
 
     private async Task<(QueueTicket Ticket, DoctorSession Session, Doctor Doctor)> LoadTicketAsync(Guid ticketId, CancellationToken ct)
     {

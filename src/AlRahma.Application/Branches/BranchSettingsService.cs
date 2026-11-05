@@ -53,6 +53,7 @@ public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAudi
                 new(SettingsReader.CheckInQrScopeValues.Branch, "أي عيادة في الفرع"),
             ]),
         new(SettingsReader.FollowUpWindowDays, "فترة المراجعة بعد الكشف", "يوم", 14, 0, 90),
+        new(SettingsReader.FreeReturnDays, "مدة العودة المجانية بالنتائج (مختبر، أشعة) بعد إغلاق الوجبة. الطبيب ثم العيادة يتجاوزانها", "يوم", 7, 0, 90),
         new("refund.cashier_limit", "حد الاسترجاع المسموح لأمين الصندوق", "دينار", 50000, 0, 10_000_000),
         new("prescription.valid_days", "مدة صلاحية الوصفة", "يوم", 30, 1, 365),
         new(SettingsReader.ReferralExpiryDays, "إغلاق التحويل غير المفعّل تلقائياً بعد", "يوم", 7, 1, 90),

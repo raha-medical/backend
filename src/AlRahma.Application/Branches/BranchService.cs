@@ -27,7 +27,11 @@ public record BranchDepartmentCountsDto(int Clinic, int Lab, int Radiology, int 
 /// <summary>نشاط الفرع الآن: ورديات صندوق مفتوحة، ومرضى حاضرون اليوم (في الانتظار بعد الحضور، مستدعون، داخل الغرفة).</summary>
 public record BranchActivityDto(int OpenShifts, int PatientsWaiting, int PatientsInRoom);
 public record ClinicDto(Guid ClinicId, Guid BranchId, string Name, string Department, short? Floor, bool IsActive,
-    bool IsOpenToday = true, ClosureDto? Closure = null);
+    bool IsOpenToday = true, ClosureDto? Closure = null)
+{
+    /// <summary>مدة العودة المجانية بالنتائج لأطباء العيادة؛ null = إعداد الفرع queue.free_return_days.</summary>
+    public short? FreeReturnDays { get; init; }
+}
 
 public record CreateBranchRequest(string? Code, string? Name, string? City, string? Address, string? Phone,
     decimal? Latitude, decimal? Longitude, string? WorkingHours, List<WorkingDayInput>? WorkingHoursSchedule = null);
@@ -35,7 +39,8 @@ public record CreateBranchRequest(string? Code, string? Name, string? City, stri
 public record UpdateBranchRequest(string? Name, string? City, string? Address, string? Phone, bool? IsActive,
     decimal? Latitude, decimal? Longitude, string? WorkingHours, bool? CancelBookings, List<WorkingDayInput>? WorkingHoursSchedule = null);
 public record CreateClinicRequest(string? Name, string? Department, short? Floor);
-public record UpdateClinicRequest(string? Name, string? Department, short? Floor, bool? IsActive);
+/// <summary>free_return_days: null = بلا تغيير، -1 = إعداد الفرع، 0..90 = قيمة العيادة.</summary>
+public record UpdateClinicRequest(string? Name, string? Department, short? Floor, bool? IsActive, short? FreeReturnDays = null);
 
 /// <summary>
 /// الفروع (المدير العام فقط) والعيادات والأقسام (المدير العام، ومدير الفرع لفرعه).
@@ -319,6 +324,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             .Check(req.Name is null || (req.Name.Trim().Length is > 0 and <= 100), "name", "اسم العيادة (100 حرف كحد أقصى)")
             .Check(req.Department is null || Departments.Contains(req.Department), "department", "clinic | lab | radiology | pharmacy")
             .Check(req.Floor is null or >= -5 and <= 100, "floor", "رقم طابق غير صالح")
+            .Check(req.FreeReturnDays is null or -1 or >= 0 and <= 90, "free_return_days", "من 0 إلى 90، أو -1 لإعداد الفرع")
             .ThrowIfInvalid();
 
         var hasDoctors = await db.Doctors.AnyAsync(d => d.ClinicId == clinicId && d.IsActive, ct);
@@ -336,6 +342,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
         if (req.Name is not null) clinic.Name = req.Name.Trim();
         if (req.Department is not null) clinic.Department = req.Department;
         if (req.Floor is not null) clinic.Floor = req.Floor;
+        if (req.FreeReturnDays is not null) clinic.FreeReturnDays = req.FreeReturnDays == -1 ? null : req.FreeReturnDays;
         var deactivatedServices = 0;
         if (req.IsActive == false && clinic.IsActive && hasServices)
         {
@@ -402,5 +409,5 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
 
     private static BranchDto ToDto(Branch b) =>
         new(b.BranchId, b.Code, b.Name, b.City, b.Address, b.Phone, b.Latitude, b.Longitude, b.WorkingHours, b.IsActive);
-    private static ClinicDto ToDto(Clinic c) => new(c.ClinicId, c.BranchId, c.Name, c.Department, c.Floor, c.IsActive);
+    private static ClinicDto ToDto(Clinic c) => new(c.ClinicId, c.BranchId, c.Name, c.Department, c.Floor, c.IsActive) { FreeReturnDays = c.FreeReturnDays };
 }

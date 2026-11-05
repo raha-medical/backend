@@ -47,16 +47,18 @@ public class DoctorService(IAppDbContext db, ICurrentUser current, IAuditLogger 
             .Check(req.FollowUpDays is null or >= 0 and <= 180, "follow_up_days", "من 0 إلى 180")
             .Check(req.FollowUpPrice is null or >= 0, "follow_up_price", "صفر أو أكثر")
             .Check(req.OnlineDepositAmount is null or >= 0, "online_deposit_amount", "صفر أو أكثر")
+            .Check(req.FreeReturnDays is null or >= 0 and <= 90, "free_return_days", "من 0 إلى 90")
             .ThrowIfInvalid();
         var d = await LoadDoctorAsync(doctorId, ct);
-        var before = new { d.AllowExtra, d.LateGraceMinutes, d.FollowUpDays, d.FollowUpPrice, d.OnlineDepositAmount };
+        var before = new { d.AllowExtra, d.LateGraceMinutes, d.FollowUpDays, d.FollowUpPrice, d.OnlineDepositAmount, d.FreeReturnDays };
         d.AllowExtra = req.AllowExtra ?? true;
         d.LateGraceMinutes = req.LateGraceMinutes;
         d.FollowUpDays = req.FollowUpDays;
         d.FollowUpPrice = req.FollowUpPrice;
         d.OnlineDepositAmount = req.OnlineDepositAmount;
+        d.FreeReturnDays = req.FreeReturnDays;
         audit.Add("DOCTOR_SETTINGS_CHANGED", "doctor", d.DoctorId, before: before,
-            after: new { d.AllowExtra, d.LateGraceMinutes, d.FollowUpDays, d.FollowUpPrice, d.OnlineDepositAmount });
+            after: new { d.AllowExtra, d.LateGraceMinutes, d.FollowUpDays, d.FollowUpPrice, d.OnlineDepositAmount, d.FreeReturnDays });
         await db.SaveChangesAsync(ct);
         return await SettingsDtoAsync(d, ct);
     }
@@ -67,7 +69,11 @@ public class DoctorService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         return new DoctorSettingsDto(d.AllowExtra, d.LateGraceMinutes, d.FollowUpDays, d.FollowUpPrice, d.OnlineDepositAmount,
             await settings.GetLongAsync(SettingsReader.NoShowGraceMinutes, branch, 20, ct),
             await settings.GetLongAsync(SettingsReader.FollowUpWindowDays, branch, 14, ct),
-            await settings.GetLongAsync(SettingsReader.OnlineDepositAmount, branch, 5000, ct));
+            await settings.GetLongAsync(SettingsReader.OnlineDepositAmount, branch, 5000, ct))
+        {
+            FreeReturnDays = d.FreeReturnDays,
+            EffectiveFreeReturnDays = d.FreeReturnDays ?? d.Clinic.FreeReturnDays ?? (int)await settings.GetLongAsync(SettingsReader.FreeReturnDays, branch, 7, ct),
+        };
     }
 
     private DoctorDto ToDto(Doctor d) =>

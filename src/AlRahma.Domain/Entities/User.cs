@@ -66,6 +66,8 @@ public class Doctor
     public long? FollowUpPrice { get; set; }
     /// <summary>العربون الإلكتروني لهذا الطبيب؛ null = إعداد الفرع، 0 = لا خيار عربون.</summary>
     public long? OnlineDepositAmount { get; set; }
+    /// <summary>مدة العودة المجانية بالنتائج بالأيام؛ null = قيمة العيادة ثم إعداد الفرع queue.free_return_days (ترحيل 018).</summary>
+    public short? FreeReturnDays { get; set; }
 
     public Clinic? Clinic { get; set; }
 }

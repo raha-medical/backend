@@ -65,7 +65,8 @@ CREATE TABLE clinics (
     department      VARCHAR(20)  NOT NULL CHECK (department IN ('clinic', 'lab', 'radiology', 'pharmacy')),
     floor           SMALLINT,
     is_active       BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    free_return_days SMALLINT CHECK (free_return_days IS NULL OR free_return_days BETWEEN 0 AND 90)   -- ترحيل 018: فارغ = إعداد الفرع
 );
 CREATE INDEX idx_clinics_branch ON clinics(branch_id);
 
@@ -244,7 +245,8 @@ CREATE TABLE doctors (
     late_grace_minutes    SMALLINT CHECK (late_grace_minutes IS NULL OR late_grace_minutes BETWEEN 0 AND 180), -- فارغ = إعداد الفرع
     follow_up_days        SMALLINT CHECK (follow_up_days IS NULL OR follow_up_days BETWEEN 0 AND 180),   -- ترحيل 008: فارغ = إعداد الفرع
     follow_up_price       BIGINT   CHECK (follow_up_price IS NULL OR follow_up_price >= 0),              -- فارغ = سعر خدمة المراجعة، 0 = مجانية
-    online_deposit_amount BIGINT   CHECK (online_deposit_amount IS NULL OR online_deposit_amount >= 0)   -- فارغ = إعداد الفرع، 0 = لا عربون
+    online_deposit_amount BIGINT   CHECK (online_deposit_amount IS NULL OR online_deposit_amount >= 0),  -- فارغ = إعداد الفرع، 0 = لا عربون
+    free_return_days      SMALLINT CHECK (free_return_days IS NULL OR free_return_days BETWEEN 0 AND 90)  -- ترحيل 018: فارغ = العيادة ثم الفرع
 );
 CREATE INDEX idx_doctors_clinic ON doctors(clinic_id);
 
@@ -477,9 +479,9 @@ CREATE TABLE queue_tickets (
     sequence_number     SMALLINT NOT NULL,
     queue_position      SMALLINT,                            -- الترتيب الحالي بعد الطوارئ/التخطي
     source              VARCHAR(10) NOT NULL CHECK (source IN ('online', 'walk_in', 'phone')),
-    priority            VARCHAR(20) NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal', 'emergency', 'late_reinserted')),
+    priority            VARCHAR(20) NOT NULL DEFAULT 'normal' CHECK (priority IN ('normal', 'emergency', 'late_reinserted', 'returning')),
     status              VARCHAR(20) NOT NULL DEFAULT 'waiting' CHECK (status IN (
-                            'waiting', 'arrived', 'called', 'in_room', 'completed', 'skipped', 'no_show', 'cancelled')),
+                            'waiting', 'arrived', 'called', 'in_room', 'completed', 'skipped', 'no_show', 'cancelled', 'awaiting_results')),
     emergency_reason    TEXT,
     estimated_time      TIMESTAMPTZ,
     arrived_at          TIMESTAMPTZ,
@@ -497,9 +499,15 @@ CREATE TABLE queue_tickets (
     on_the_way_eta_minutes SMALLINT,
     is_extra              BOOLEAN NOT NULL DEFAULT FALSE,    -- مراجع فوق السعة بموافقة (ترحيل 007)
     extra_approved_by     UUID REFERENCES users(user_id),
+    awaiting_since        TIMESTAMPTZ,                       -- ترحيل 018: بانتظار المختبر/الأشعة/السونار/الصيدلية
+    returned_at           TIMESTAMPTZ,                       -- عاد بالنتائج (أولوية returning)
+    free_return_until     TIMESTAMPTZ,                       -- أُغلقت الوجبة وهو بانتظار قسم: عودة مجانية حتى هذا الوقت
+    original_ticket_id    UUID REFERENCES queue_tickets(ticket_id),   -- عودة بالنتائج في وجبة أخرى
     UNIQUE (session_id, ticket_number)
 );
 CREATE INDEX idx_queue_session_status ON queue_tickets(session_id, status);
+CREATE INDEX idx_queue_free_return ON queue_tickets(patient_id, doctor_id, free_return_until) WHERE free_return_until IS NOT NULL;
+CREATE INDEX idx_queue_awaiting ON queue_tickets(patient_id, doctor_id) WHERE status = 'awaiting_results';
 CREATE INDEX idx_queue_branch_status ON queue_tickets(branch_id, status);
 
 ALTER TABLE patient_no_shows ADD CONSTRAINT fk_no_shows_ticket FOREIGN KEY (ticket_id) REFERENCES queue_tickets(ticket_id);
@@ -1199,6 +1207,7 @@ ALTER TABLE medical_orders ADD COLUMN critical_notified_at TIMESTAMPTZ;
 ALTER TABLE outbound_messages DROP CONSTRAINT outbound_messages_status_check;
 ALTER TABLE outbound_messages ADD CONSTRAINT outbound_messages_status_check CHECK (status IN ('sandbox', 'queued', 'sent', 'failed'));
 INSERT INTO system_settings (branch_id, key, value) VALUES (NULL, 'referral.expiry_days', '7'), (NULL, 'results.show_deferred_to_patient', '0');
+INSERT INTO system_settings (branch_id, key, value) VALUES (NULL, 'queue.free_return_days', '7');   -- الترحيل 018
 
 -- عداد رسائل المساعد الذكي لكل حساب (الترحيل 013). لا يُخزن نص أي رسالة.
 CREATE TABLE assistant_usage (
@@ -1228,6 +1237,7 @@ INSERT INTO role_permissions (role_code, permission) VALUES
     ('branch_manager', 'roles.view'), ('branch_manager', 'branches.view'),
     ('branch_manager', 'lab.view'), ('branch_manager', 'radiology.view'), ('branch_manager', 'pharmacy.view'),   -- الترحيل 012
     ('branch_manager', 'notifications.branch_view'), ('branch_manager', 'backups.view'), ('branch_manager', 'audit.read'),
+    ('branch_manager', 'patients.merge'),                                                                        -- الترحيل 017
     ('doctor', 'clinical.write'), ('doctor', 'queue.manage'), ('doctor', 'deferrals.grant'),
     ('receptionist', 'queue.manage'), ('receptionist', 'payments.collect'), ('receptionist', 'patients.write'),
     ('accountant', 'shifts.review'), ('accountant', 'refunds.approve'), ('accountant', 'reports.finance'),

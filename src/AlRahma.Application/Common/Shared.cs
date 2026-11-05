@@ -38,6 +38,8 @@ public class SettingsReader(IAppDbContext db)
     public const string NoShowGraceMinutes = "queue.no_show_grace_minutes";
     /// <summary>بعد نهاية الوجبة (الفعلية) بهذه الدقائق يُغلق التسجيل تلقائياً وتُعلّم الحجوزات الباقية غائبة.</summary>
     public const string AutoCloseAfterMinutes = "queue.auto_close_after_minutes";
+    /// <summary>مدة العودة المجانية بالنتائج بعد إغلاق الوجبة (يوم). الطبيب ثم العيادة يتجاوزانها.</summary>
+    public const string FreeReturnDays = "queue.free_return_days";
     /// <summary>أقصى عدد «إضافي» فوق السعة كنسبة من سعة الوجبة (0 = بلا حد).</summary>
     public const string ExtraMaxPercent = "queue.extra_max_percent";
     /// <summary>من يستدعي المريض التالي في الفرع: doctor | reception | both.</summary>

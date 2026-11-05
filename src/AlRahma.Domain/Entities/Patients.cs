@@ -137,8 +137,10 @@ public static class TicketStatuses
     public const string Skipped = "skipped";
     public const string NoShow = "no_show";
     public const string Cancelled = "cancelled";
+    /// <summary>بانتظار المختبر / الأشعة / السونار / الصيدلية: خارج الترتيب، ويعود بالنتائج بلا فاتورة جديدة (ترحيل 018).</summary>
+    public const string AwaitingResults = "awaiting_results";
 
-    /// <summary>تذاكر ما زالت في الطابور (لم تنتهِ).</summary>
+    /// <summary>تذاكر ما زالت في الطابور (لم تنتهِ). awaiting_results ليست منها: خارج الترتيب.</summary>
     public static readonly string[] Active = [Waiting, Arrived, Called, InRoom, Skipped];
 }
 
@@ -147,6 +149,8 @@ public static class TicketPriorities
     public const string Normal = "normal";
     public const string Emergency = "emergency";
     public const string LateReinserted = "late_reinserted";
+    /// <summary>عائد بالنتائج: بعد الطوارئ وقبل المحجوزين والمباشرين.</summary>
+    public const string Returning = "returning";
 }
 
 public class QueueTicket
@@ -189,4 +193,12 @@ public class QueueTicket
     /// <summary>مراجع فوق سعة الوجبة بموافقة الاستقبال (ترحيل 007).</summary>
     public bool IsExtra { get; set; }
     public Guid? ExtraApprovedBy { get; set; }
+    /// <summary>بداية «بانتظار قسم» (ترحيل 018): أنهى الطبيب المعاينة وللزيارة تحويلات مختبر/أشعة/سونار لم تكتمل.</summary>
+    public DateTimeOffset? AwaitingSince { get; set; }
+    /// <summary>عاد المراجع بالنتائج إلى الطبيب (أولوية returning) بلا فاتورة جديدة.</summary>
+    public DateTimeOffset? ReturnedAt { get; set; }
+    /// <summary>أُغلقت الوجبة وهو بانتظار قسم: عودته بالنتائج مجانية حتى هذا الوقت (في أي وجبة للطبيب نفسه).</summary>
+    public DateTimeOffset? FreeReturnUntil { get; set; }
+    /// <summary>تذكرة «عودة بالنتائج» في وجبة أخرى: التذكرة الأصلية.</summary>
+    public Guid? OriginalTicketId { get; set; }
 }

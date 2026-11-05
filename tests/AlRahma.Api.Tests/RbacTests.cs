@@ -14,7 +14,9 @@ public class RbacTests(TestApp app)
         ["branch_manager"] = ["users.manage", "services.manage", "patients.write", "patients.unban", "queue.manage", "discounts.grant",
             "refunds.approve", "shifts.review", "deferrals.grant", "reports.finance", "expenses.manage", "roles.view", "branches.view",
             // الترحيل 012 (عيب D3): قراءة كل فرعه، بلا صلاحية كتابة جديدة
-            "lab.view", "radiology.view", "pharmacy.view", "audit.read", "notifications.branch_view", "backups.view"],
+            "lab.view", "radiology.view", "pharmacy.view", "audit.read", "notifications.branch_view", "backups.view",
+            // الترحيل 017 (8.6-ق1): دمج الملفات بالصلاحية لا بالدور
+            "patients.merge"],
         ["doctor"] = ["clinical.write", "queue.manage", "deferrals.grant"],
         ["receptionist"] = ["queue.manage", "payments.collect", "patients.write"],
         ["accountant"] = ["shifts.review", "refunds.approve", "reports.finance", "patients.unban", "payments.collect", "audit.read", "expenses.manage"],

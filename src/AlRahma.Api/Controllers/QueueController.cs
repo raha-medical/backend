@@ -89,6 +89,12 @@ public class QueueController(QueueService queue, DeviceService devices) : Contro
     public Task<SessionControlDto> Registration(Guid sessionId, SessionRegistrationRequest req, CancellationToken ct) =>
         queue.RegistrationAsync(sessionId, req, ct);
 
+    /// <summary>«عاد بالنتائج»: دور «بانتظار قسم» يعود واصلاً بأولوية returning، بلا فاتورة ولا رقم جديد. external = نتائج خارجية.</summary>
+    [HttpPost("api/v1/queue/tickets/{ticketId:guid}/returned")]
+    [ProducesResponseType<CheckInResponse>(200)]
+    public Task<CheckInResponse> Returned(Guid ticketId, [FromBody] ReturnedRequest? req, CancellationToken ct) =>
+        queue.ReturnedAsync(ticketId, req, ct);
+
     [HttpPost("api/v1/queue/tickets/{ticketId:guid}/late-arrival")]
     [ProducesResponseType<TicketActionResponse>(200)]
     public Task<TicketActionResponse> LateArrival(Guid ticketId, CancellationToken ct) => queue.LateArrivalAsync(ticketId, ct);

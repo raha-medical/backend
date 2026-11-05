@@ -1,0 +1,82 @@
+# تشغيل محلي كامل: PostgreSQL (تُنشأ الجداول تلقائياً من database/schema_v5.sql أول مرة) + الـ API
+# الأسرار تُقرأ من ملف .env بجانب هذا الملف (انسخ .env.example إلى .env). ملف .env مستبعد من git.
+services:
+  # PostgreSQL 16 + pgBackRest (نسخ احتياطي مجاني). الدليل: docs/backup_restore.md
+  db:
+    build: ./deploy/backup
+    environment:
+      POSTGRES_DB: alrahma
+      POSTGRES_USER: alrahma
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      # سكربتات النسخ و pgBackRest تتصل محلياً بنفس مستخدم قاعدة البيانات
+      PGUSER: alrahma
+      PGBACKREST_PG1_USER: alrahma
+      # كلمة سر تشفير النسخ: غيّرها في الإنتاج واحفظها خارج السيرفر (بدونها لا يمكن الاسترجاع)
+      PGBACKREST_REPO1_CIPHER_PASS: ${BACKUP_CIPHER_PASS:?set BACKUP_CIPHER_PASS in .env}
+      BACKUP_REPO2: "0"
+      BACKUP_FILES_MODE: "off"
+      BACKUP_FILES_SOURCE: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-alrahma}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+    ports: ["55432:5432"]   # 5432 is taken by the local PostgreSQL service
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - pgbackrest:/var/lib/pgbackrest
+      - ./database/schema_v5.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+
+  # تخزين الملفات (صور الأطباء، الأشعة، نتائج المختبر). لوحة التحكم: http://localhost:9001
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-alrahma}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?set MINIO_ROOT_PASSWORD in .env}
+      # يسمح للمتصفح (الفرونت) بالرفع المباشر على الروابط الموقعة
+      MINIO_API_CORS_ALLOW_ORIGIN: http://localhost:3000
+    ports: ["9000:9000", "9001:9001"]
+    volumes:
+      - miniodata:/data
+
+  # ينشئ الـ bucket مرة واحدة
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on: [minio]
+    entrypoint: >
+      /bin/sh -c "until mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-alrahma} ${MINIO_ROOT_PASSWORD}; do sleep 1; done;
+      mc mb --ignore-existing local/medical"
+
+  api:
+    build: .
+    depends_on: [db, minio]
+    ports: ["8088:8080"]   # 8080 is taken by WildFly on this PC
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ConnectionStrings__Default: Host=db;Port=5432;Database=alrahma;Username=alrahma;Password=${POSTGRES_PASSWORD}
+      Jwt__SigningKey: ${JWT_SIGNING_KEY:?set JWT_SIGNING_KEY in .env}
+      Cors__Origins__0: http://localhost:3000
+      Cors__Origins__1: http://127.0.0.1:3000
+      Bootstrap__AdminUsername: admin
+      Bootstrap__AdminPassword: ${ADMIN_PASSWORD:?set ADMIN_PASSWORD in .env}
+      Storage__ServiceUrl: http://minio:9000
+      Storage__PublicUrl: http://localhost:9000
+      Storage__AccessKey: ${MINIO_ROOT_USER:-alrahma}
+      Storage__SecretKey: ${MINIO_ROOT_PASSWORD}
+      Otp__Mode: sandbox
+      Sms__Mode: sandbox
+      Push__Mode: sandbox
+      Payments__Mode: sandbox
+      Assistant__Provider: sandbox
+      Payments__PublicBaseUrl: http://localhost:3000
+      Receipts__VerifyBaseUrl: http://localhost:3000/verify/
+      Backup__Enabled: "true"
+      Backup__Repo2Enabled: "false"
+      Backup__Files__Mode: "off"
+      Drawer__KeyFile: /keys/drawer-es256.pem
+    volumes:
+      - drawerkeys:/keys
+
+volumes:
+  pgdata:
+  pgbackrest:
+  miniodata:
+  drawerkeys:

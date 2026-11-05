@@ -47,7 +47,8 @@ public record EmergencyRequest(string? Reason);
 public record EmergencyResponse(Guid TicketId, string Priority, int Position, int AffectedTickets);
 
 /// <summary>تثبيت الحضور الذاتي من تطبيق المريض: token = الرمز أو نص QR الشاشة كما هو. booking_id اختياري في /me/self-check-in.</summary>
-public record SelfCheckInRequest(string? Token, Guid? BookingId = null);
+/// <summary>visit_mode: نفس خيار الاستقبال (return | new) إذا كان المريض ينتظر نتائج الطبيب نفسه أو له عودة مجانية.</summary>
+public record SelfCheckInRequest(string? Token, Guid? BookingId = null, string? VisitMode = null);
 public record SelfCheckInResponse(Guid BookingId, Guid TicketId, string TicketNumber, string Status, short? QueuePosition, DateTimeOffset? EstimatedTime,
     Guid InvoiceId, string VisitKind, long AmountDue, string PaymentStatus, bool AlreadyCheckedIn, string DoctorName, string ClinicName, short? Floor,
     string MessageAr);
@@ -111,19 +112,27 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         }
 
         return bookingId is { } bid
-            ? await CheckInBookingAsync(bid, ct)
+            ? (await CheckInBookingAsync(bid, null, ct, req.VisitMode)).Response
             : await CheckInWalkInAsync(req, ct);
     }
 
     private async Task<CheckInResponse> CheckInBookingAsync(Guid bookingId, CancellationToken ct) =>
         (await CheckInBookingAsync(bookingId, null, ct)).Response;
 
+    private static string? VisitModeOf(string? raw)
+    {
+        var mode = raw?.Trim().ToLowerInvariant();
+        new Validator().Check(mode is null or "return" or "new", "visit_mode", "return أو new").ThrowIfInvalid();
+        return mode;
+    }
+
     /// <summary>
     /// تثبيت حضور الحجز (الاستقبال أو المريض بمسح QR الشاشة): نفس النتيجة تماماً، تذكرة «واصل» وفاتورة الكشفية والأحداث المباشرة.
     /// تكرار التثبيت يعيد نفس النتيجة (Already = true).
     /// </summary>
-    private async Task<(CheckInResponse Response, bool Already)> CheckInBookingAsync(Guid bookingId, CheckInContext? ctx, CancellationToken ct)
+    private async Task<(CheckInResponse Response, bool Already)> CheckInBookingAsync(Guid bookingId, CheckInContext? ctx, CancellationToken ct, string? visitMode = null)
     {
+        var mode = VisitModeOf(visitMode);
         var branchId = ctx?.BranchId ?? current.BranchId;
         await using var tx = await db.BeginTransactionAsync(ct);
         // M3: قفل الوجبة قبل قراءة الحجز، فمسحان متزامنان لنفس الحجز لا يُنشئان فاتورتين
@@ -151,17 +160,32 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (booking.Session.SessionDate != op.Today)
             throw new AppException(422, "BOOKING_NOT_TODAY", "الحجز ليس لهذا اليوم", $"موعد الحجز {booking.Session.SessionDate:yyyy-MM-dd}");
 
+        // 1.2 (قرار المالك): محجوز ينتظر نتائج هذا الطبيب أو له عودة مجانية → يختار الاستقبال أو المريض «عودة بالنتائج» أو «زيارة جديدة»
+        var prior = op.IsOffline ? null : await ReturnCandidateAsync(booking.PatientId, doctor.DoctorId, ct);
+        if (prior is not null && mode is null) throw await ReturnOrNewRequiredAsync(prior, ct);
+        if (mode == "return" && prior is null)
+            throw new AppException(409, "NO_RETURN_AVAILABLE", "لا توجد عودة بالنتائج لهذا المراجع عند هذا الطبيب", "ثبّت حضوره زيارة جديدة");
+        var returnMode = mode == "return";
+
         var now = op.Now;
         // تجاوز مهلة التأخر فتخطاه النظام: يُعامل كمتأخر ويُدرج في أول فجوة (قرار Q1)
         if (ticket.Status == TicketStatuses.Skipped && ticket.Priority != TicketPriorities.Emergency) ticket.Priority = TicketPriorities.LateReinserted;
+        if (returnMode)
+        {
+            // دور الحجز نفسه يصبح «عائد بالنتائج» بكشفية مجانية (الحجز المدفوع مسبقاً يبقى بفاتورته المدفوعة)
+            if (ticket.Priority != TicketPriorities.Emergency) ticket.Priority = TicketPriorities.Returning;
+            ticket.ReturnedAt = now;
+            ticket.OriginalTicketId = prior!.TicketId;
+        }
         booking.Status = BookingStatuses.CheckedIn;
         booking.CheckedInAt = now;
         booking.CheckInMethod = ctx?.Method ?? CheckInMethods.Reception;
         ticket.Status = TicketStatuses.Arrived;
         ticket.ArrivedAt = now;
         var service = await engine.ConsultationServiceAsync(booking.Session.ClinicId, booking.VisitKind, ct);
-        var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, booking.VisitKind, booking.Price,
-            alreadyPaid: booking.PaymentStatus == PaymentStatuses.Paid, ct);
+        var prepaid = booking.PaymentStatus == PaymentStatuses.Paid;
+        var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, booking.VisitKind,
+            returnMode && !prepaid ? 0 : booking.Price, alreadyPaid: prepaid, ct);
         if (booking.PaymentStatus == PaymentStatuses.Paid)
         {
             // الحجز المدفوع إلكترونياً: الدفعة تُربط ببند الكشفية (للإيصال والاسترجاع)
@@ -172,6 +196,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                 db.PaymentAllocations.Add(new PaymentAllocation { PaymentId = online, InvoiceItemId = invoice.Items[0].InvoiceItemId, Amount = invoice.Items[0].NetPrice });
         }
         audit.Add("CHECKED_IN", "queue_ticket", ticket.TicketId, after: new { booking_id = booking.BookingId, invoice.InvoiceNumber, method = booking.CheckInMethod });
+        if (prior is not null) await RecordConversionAsync(ticket, prior, returnMode, booking.CheckInMethod, now, ct);
         await db.SaveChangesAsync(ct);
         await engine.RecalculateAsync(booking.Session, ct);
         if (tx is not null) await tx.CommitAsync(ct);
@@ -248,7 +273,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (session.SessionDate != today)
             throw new AppException(422, "BOOKING_NOT_TODAY", "الحجز ليس لهذا اليوم", $"موعد الحجز {session.SessionDate:yyyy-MM-dd}");
 
-        var (r, already) = await CheckInBookingAsync(booking.BookingId, new CheckInContext(session.BranchId, CheckInMethods.SelfQr), ct);
+        var (r, already) = await CheckInBookingAsync(booking.BookingId, new CheckInContext(session.BranchId, CheckInMethods.SelfQr), ct, req.VisitMode);
         var doctorName = await db.Doctors.AsNoTracking().Where(d => d.DoctorId == session.DoctorId).Select(d => d.FullName).FirstAsync(ct);
         var message = r.AmountDue > 0
             ? (r.DepositCredit > 0
@@ -290,8 +315,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             throw new AppException(409, "PATIENT_MERGED", "هذا الملف مدموج في ملف آخر");
 
         // 1.2 (قرار المالك): المراجع ينتظر نتائج هذا الطبيب أو له عودة مجانية صالحة → الاستقبال يختار «عودة بالنتائج» أو «زيارة جديدة»
-        var visitMode = req.VisitMode?.Trim().ToLowerInvariant();
-        new Validator().Check(visitMode is null or "return" or "new", "visit_mode", "return أو new").ThrowIfInvalid();
+        var visitMode = VisitModeOf(req.VisitMode);
         var prior = op.IsOffline ? null : await ReturnCandidateAsync(patient.PatientId, doctor.DoctorId, ct);
         if (prior is not null && visitMode is null) throw await ReturnOrNewRequiredAsync(prior, ct);
         if (visitMode == "return" && prior is null)
@@ -390,18 +414,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         var price = returnNew ? 0 : QueueEngine.ConsultationPrice(doctor, service, visitKind);
         var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, visitKind, price, alreadyPaid: false, ct);
         audit.Add("CHECKED_IN", "queue_ticket", ticket.TicketId, after: new { source = "walk_in", invoice.InvoiceNumber, is_extra = isExtra, offline = op.IsOffline });
-        if (prior is not null)
-        {
-            if (returnNew && prior.Status == TicketStatuses.AwaitingResults)
-            {
-                // انتظار من يوم سابق لم يُغلق بعد: العودة تُنهيه
-                prior.Status = TicketStatuses.Completed;
-                prior.CompletedAt = now;
-                if (prior.BookingId is { } pb) (await db.Bookings.FirstAsync(b => b.BookingId == pb, ct)).Status = BookingStatuses.Completed;
-            }
-            audit.Add(returnNew ? "TICKET_RETURN_NEW_SESSION" : "VISIT_NEW_INSTEAD_OF_RETURN", "queue_ticket", ticket.TicketId,
-                after: await ConversionLogAsync(returnNew ? "return_new_session" : "new_visit", ticket, prior, now, ct));
-        }
+        if (prior is not null) await RecordConversionAsync(ticket, prior, returnNew, "walk_in", now, ct);
         await db.SaveChangesAsync(ct);
         await engine.RecalculateAsync(session, ct);
         if (tx is not null) await tx.CommitAsync(ct);
@@ -904,6 +917,22 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                 ["options"] = new[] { "return", "new" }, ["default"] = "return",
             },
         };
+    }
+
+    /// <summary>
+    /// بعد اختيار «عودة» على دور جديد (وجبة أخرى أو حجز): الدور المنتظر الأصلي ينتهي. وفي الحالتين يُسجل القرار (قرار المالك 3).
+    /// </summary>
+    private async Task RecordConversionAsync(QueueTicket ticket, QueueTicket prior, bool returned, string? via, DateTimeOffset now, CancellationToken ct)
+    {
+        if (returned && prior.Status == TicketStatuses.AwaitingResults)
+        {
+            prior.Status = TicketStatuses.Completed;
+            prior.CompletedAt = now;
+            if (prior.BookingId is { } pb) (await db.Bookings.FirstAsync(b => b.BookingId == pb, ct)).Status = BookingStatuses.Completed;
+        }
+        var log = await ConversionLogAsync(returned ? "return_new_ticket" : "new_visit", ticket, prior, now, ct);
+        log["via"] = via;
+        audit.Add(returned ? "TICKET_RETURN_NEW_SESSION" : "VISIT_NEW_INSTEAD_OF_RETURN", "queue_ticket", ticket.TicketId, after: log);
     }
 
     /// <summary>سجل التحويل إلى عائد أو زيارة جديدة (قرار المالك 3): الموظف ووقت العملية والتذاكر.</summary>

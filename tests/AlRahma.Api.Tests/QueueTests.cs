@@ -569,4 +569,45 @@ public class QueueTests(TestApp app)
         }, Guid.NewGuid());
         Assert.Equal("completed", c3.Body!["queue"]!["status"]!.GetValue<string>());
     }
+
+    [SkippableFact]
+    public async Task Booked_patient_awaiting_results_must_choose_and_return_is_free_on_the_booking_ticket()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var s = await SetupAsync();
+        var (lab, _) = await DiagnosticServicesAsync();
+        var patient = await PatientAsync(s.Reception, "محجوز عائد");
+        var original = (await VisitWithOrdersAsync(s, patient, [lab], []))["ticket_id"]!.GetValue<Guid>();
+
+        // الدوام الأول انتهى والمراجع ما زال بانتظار المختبر، وله حجز هاتفي في وجبة اليوم
+        var booking = await Api.PostAsync(s.Reception, "/api/v1/bookings", new { patient_id = patient, session_id = await TodaySessionAsync(s), visit_kind = "auto" }, Guid.NewGuid());
+        Assert.True(booking.Status == 201, booking.Raw);
+        var bookingId = booking.Body!["booking_id"]!.GetValue<Guid>();
+
+        var ask = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { booking_id = bookingId }, Guid.NewGuid());
+        Assert.Equal("RETURN_OR_NEW_REQUIRED", ask.Code);
+        Assert.Equal(original, ask.Body!["ticket_id"]!.GetValue<Guid>());
+        Assert.Equal("booked", await app.ScalarAsync<string>($"SELECT status FROM bookings WHERE booking_id = '{bookingId}'"));
+
+        var ret = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { booking_id = bookingId, visit_mode = "return" }, Guid.NewGuid());
+        Assert.True(ret.Status == 201, ret.Raw);
+        var ticket = ret.Body!["ticket_id"]!.GetValue<Guid>();
+        Assert.Equal(0, ret.Body!["amount_due"]!.GetValue<long>());
+        Assert.Equal("paid", ret.Body!["payment_status"]!.GetValue<string>());
+        Assert.Equal("returning", await app.ScalarAsync<string>($"SELECT priority FROM queue_tickets WHERE ticket_id = '{ticket}'"));
+        Assert.Equal(original, await app.ScalarAsync<Guid>($"SELECT original_ticket_id FROM queue_tickets WHERE ticket_id = '{ticket}'"));
+        Assert.Equal("completed", await app.ScalarAsync<string>($"SELECT status FROM queue_tickets WHERE ticket_id = '{original}'"));
+        var log = await app.ScalarAsync<string>($"SELECT after::text FROM audit_logs WHERE action = 'TICKET_RETURN_NEW_SESSION' AND entity_id = '{ticket}'");
+        Assert.Contains("\"via\": \"reception\"", log);
+        Assert.Contains("\"staff_name\"", log);
+
+        // محجوز آخر يختار «زيارة جديدة»: السعر المعتاد، والقرار مسجل
+        var p2 = await PatientAsync(s.Reception, "محجوز زيارة جديدة");
+        await VisitWithOrdersAsync(s, p2, [lab], []);
+        var b2 = await Api.PostAsync(s.Reception, "/api/v1/bookings", new { patient_id = p2, session_id = await TodaySessionAsync(s), visit_kind = "auto" }, Guid.NewGuid());
+        var fresh = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { booking_id = b2.Body!["booking_id"]!.GetValue<Guid>(), visit_mode = "new" }, Guid.NewGuid());
+        Assert.True(fresh.Status == 201, fresh.Raw);
+        Assert.True(fresh.Body!["amount_due"]!.GetValue<long>() > 0);
+        Assert.Equal(1L, await app.ScalarAsync<long>($"SELECT count(*) FROM audit_logs WHERE action = 'VISIT_NEW_INSTEAD_OF_RETURN' AND entity_id = '{fresh.Body!["ticket_id"]}'"));
+    }
 }

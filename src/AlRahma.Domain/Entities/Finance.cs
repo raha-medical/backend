@@ -36,6 +36,25 @@ public class Shift
     public string? ReviewNote { get; set; }
     public DateTimeOffset? ReviewedAt { get; set; }
     public DateTimeOffset? CreatedOfflineAt { get; set; }
+    /// <summary>أُغلق تلقائياً بنهاية اليوم بانتظار إقرار الموظف بالمبلغ المعدود (الترحيل 020).</summary>
+    public bool AutoClosed { get; set; }
+}
+
+/// <summary>ذمة الموظف: فرق الحساب اليومي باسمه، يُرحَّل لمحاسب الفرع (الترحيل 020).</summary>
+public class StaffLiability
+{
+    public Guid LiabilityId { get; set; }
+    public Guid ShiftId { get; set; }
+    public Guid BranchId { get; set; }
+    public Guid UserId { get; set; }
+    public long Amount { get; set; }
+    public string Kind { get; set; } = "shortage";
+    public string Status { get; set; } = "pending";
+    public string? Note { get; set; }
+    public Guid? ReviewedBy { get; set; }
+    public DateTimeOffset? ReviewedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public static class ReceiptTypes
@@ -62,6 +81,9 @@ public class Receipt
     public short ReprintCount { get; set; }
     public Guid? IssuedBy { get; set; }
     public DateTimeOffset IssuedAt { get; set; }
+    /// <summary>وقت الطباعة الأولى (الترحيل 020). غير المطبوع يحتاج سبباً عند إغلاق الحساب اليومي.</summary>
+    public DateTimeOffset? PrintedAt { get; set; }
+    public string? UnprintedReason { get; set; }
 }
 
 public class Payment

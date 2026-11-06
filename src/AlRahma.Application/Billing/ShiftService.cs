@@ -10,10 +10,25 @@ namespace AlRahma.Application.Billing;
 /// <summary>`device_code` بديل عن `device_id` (الواجهة تعرف رمز الجهاز من إعدادها).</summary>
 public record OpenShiftRequest(Guid? ShiftId, long? OpeningFloat, Guid? DeviceId, Guid? ClinicId, string? DeviceCode = null);
 /// <summary>clinic_id/clinic_name/department: نقطة التحصيل (عيادة، مختبر، أشعة، صيدلية)، أو null لدرج عام.</summary>
+/// <summary>summary: ما يراه صاحب الحساب اليومي (قرار المالك). auto_closed: أُغلق تلقائياً وينتظر إقراره بالمبلغ المعدود.</summary>
 public record ShiftDto(Guid ShiftId, string Status, DateTimeOffset OpenedAt, DateTimeOffset? ClosedAt, long OpeningFloat, Guid? DeviceId, int ReceiptsCount,
-    Guid? ClinicId = null, string? ClinicName = null, string? Department = null);
+    Guid? ClinicId = null, string? ClinicName = null, string? Department = null, ShiftSummaryDto? Summary = null, bool AutoClosed = false);
+public record UnprintedReceiptDto(Guid ReceiptId, string ReceiptNumber, string Type, long Total, DateTimeOffset IssuedAt, string? Reason);
+/// <summary>
+/// الحساب اليومي كما يراه صاحبه أثناء اليوم وعند الإغلاق:
+/// cash_received النقد المستلم (وصولاته النقدية)، cash_refunds المسترجع نقداً، cash_in_hand ما في ذمته ويسلّمه
+/// (الفكة + المستلم − المسترجع − المصاريف من الصندوق)، electronic_for_my_check_ins المدفوع إلكترونياً لمن أكّد حضورهم (مفصول عن النقد)،
+/// unpaid_count من أكّد حضورهم ولم يدفعوا، unprinted_receipts وصولات لم تُسجَّل طباعتها.
+/// </summary>
+public record ShiftSummaryDto(long OpeningFloat, long CashReceived, long CashRefunds, long CashExpenses, long CashInHand,
+    long ElectronicForMyCheckIns, int ElectronicCount, int RefundsCount, long RefundsTotal, int CheckedInCount, int UnpaidCount,
+    IReadOnlyList<UnprintedReceiptDto> UnprintedReceipts, bool FromPreviousDay);
 public record DeclaredInput(long? Cash, short? PosSlipsCount, long? PosTotal);
-public record CloseShiftRequest(DeclaredInput? Declared, Dictionary<string, int>? CashDenominations, string? Note);
+/// <summary>unprinted_reasons: سبب لكل وصل غير مطبوع { receipt_id: "السبب" } (أو أعد طباعته قبل الإغلاق).</summary>
+public record CloseShiftRequest(DeclaredInput? Declared, Dictionary<string, int>? CashDenominations, string? Note,
+    Dictionary<Guid, string>? UnprintedReasons = null);
+public record StaffLiabilityDto(Guid LiabilityId, Guid ShiftId, Guid UserId, string CashierName, long Amount, string Kind, string Status,
+    string? Note, DateTimeOffset CreatedAt, DateTimeOffset? ReviewedAt);
 public record ReconciliationLine(string Method, long Expected, long? Declared, long? Variance);
 /// <summary>cash_expenses: مصاريف صُرفت نقداً من هذا الدرج (سالبة).</summary>
 public record CashBreakdown(long OpeningFloat, long CashReceived, long CashRefunds, long ExpectedInDrawer, long CashExpenses = 0, int ExpensesCount = 0);
@@ -21,15 +36,17 @@ public record ReconciliationDto(Guid ShiftId, Guid UserId, string CashierName, s
     long OpeningFloat, IReadOnlyList<ReconciliationLine> Lines, CashBreakdown CashBreakdown, int ReceiptsCount, int RefundsCount,
     int ReprintsCount, int? DeclaredPosSlipsCount, int PosSlipsCount, Dictionary<string, int>? CashDenominations, string? CloseNote,
     string? AuditStatus, long? VarianceTotal, string? ReviewDecision, string? ReviewNote, DateTimeOffset? ReviewedAt,
-    Guid? ClinicId = null, string? ClinicName = null, string? Department = null);
+    Guid? ClinicId = null, string? ClinicName = null, string? Department = null,
+    IReadOnlyList<UnprintedReceiptDto>? UnprintedReceipts = null, bool AutoClosed = false, long ElectronicForCheckIns = 0, int UnpaidCount = 0);
 public record ReviewShiftRequest(string? Decision, string? Note);
 public record ShiftListItem(Guid ShiftId, Guid UserId, string CashierName, string Status, DateTimeOffset OpenedAt, DateTimeOffset? ClosedAt,
     string? AuditStatus, long? VarianceTotal, Guid? ClinicId = null, string? ClinicName = null, string? Department = null);
 public record ShiftListQuery(string? Status, Guid? CashierId, DateOnly? From, DateOnly? To, int Page = 1, int PageSize = 20, Guid? ClinicId = null);
 
 /// <summary>
-/// الورديات والإغلاق الأعمى: الموظف يفتح ورديته بالفكة، ويحصّل، ثم يغلقها بإدخال ما عدّه بيده دون رؤية المتوقع.
-/// النظام يحسب المتوقع والفرق لحظة الإغلاق، ولا يراه إلا المحاسب ومدير الفرع.
+/// الحساب اليومي (كان «الوردية»، والـ API يبقى shifts). قرار المالك: الموظف يرى أثناء اليوم النقد المستلم والإلكتروني لمن أكّد حضورهم
+/// والاسترجاعات وعدد غير الدافعين، ويغلق بإدخال المبلغ المعدود. الفرق يُسجَّل باسمه (ذمة الموظف) ويُرحَّل لمحاسب الفرع.
+/// لا يرى حسابات غيره. الحساب من يوم سابق يُغلق تلقائياً ولا يقبل تحصيلاً جديداً.
 /// </summary>
 public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, IRealtime realtime,
     Notifications.NotificationService notifications)
@@ -44,10 +61,10 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (existing is not null)
         {
             if (existing.UserId == current.UserId) return await ToDtoAsync(existing, ct);
-            throw new AppException(409, "SHIFT_EXISTS", "يوجد وردية بنفس المعرف");
+            throw new AppException(409, "SHIFT_EXISTS", "يوجد حساب يومي بنفس المعرف");
         }
         if (await db.Shifts.AnyAsync(s => s.UserId == current.UserId && s.Status == ShiftStatuses.Open, ct))
-            throw new AppException(409, "SHIFT_ALREADY_OPEN", "لديك وردية مفتوحة", "أغلق الوردية الحالية أولاً");
+            throw new AppException(409, "SHIFT_ALREADY_OPEN", "لديك حساب يومي مفتوح", "أغلق الحساب اليومي الحالي أولاً");
         if (req.DeviceId is null && !string.IsNullOrWhiteSpace(req.DeviceCode))
         {
             var code = req.DeviceCode.Trim();
@@ -79,7 +96,7 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         }
         catch (DbUpdateException)
         {
-            throw new AppException(409, "SHIFT_ALREADY_OPEN", "لديك وردية مفتوحة");
+            throw new AppException(409, "SHIFT_ALREADY_OPEN", "لديك حساب يومي مفتوح");
         }
         return await ToDtoAsync(shift, ct);
     }
@@ -88,8 +105,19 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
     public async Task<ShiftDto> CurrentAsync(CancellationToken ct)
     {
         var shift = await db.Shifts.AsNoTracking().FirstOrDefaultAsync(s => s.UserId == current.UserId && s.Status == ShiftStatuses.Open, ct)
-                    ?? throw new AppException(404, "NO_OPEN_SHIFT", "لا توجد وردية مفتوحة");
+                    ?? throw new AppException(404, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح");
         return await ToDtoAsync(shift, ct);
+    }
+
+    /// <summary>حسابات الموظف التي أُغلقت تلقائياً ولم يقرّ بمبلغها المعدود بعد (يقرّ بـ POST /shifts/{id}/close).</summary>
+    public async Task<IReadOnlyList<ShiftDto>> AwaitingAcknowledgementAsync(CancellationToken ct)
+    {
+        var list = await db.Shifts.AsNoTracking()
+            .Where(s => s.UserId == current.UserId && s.AutoClosed && s.DeclaredCash == null && s.Status == ShiftStatuses.ClosedPendingReview)
+            .OrderBy(s => s.OpenedAt).ToListAsync(ct);
+        var result = new List<ShiftDto>();
+        foreach (var s in list) result.Add(await ToDtoAsync(s, ct));
+        return result;
     }
 
     /// <summary>
@@ -119,8 +147,8 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         await db.SaveChangesAsync(ct);
         var cashier = await db.Users.Where(u => u.UserId == shift.UserId).Select(u => u.FullName).FirstAsync(ct);
         await notifications.NotifyUsersAsync(await notifications.FinanceUsersAsync(shift.BranchId, ct), shift.BranchId,
-            Notifications.NotificationTypes.ShiftLatePayment, "دفعة متأخرة غيّرت نتيجة وردية",
-            $"{cashier}: دفعة أوفلاين وصلت بعد الإغلاق{(reopened ? "، وأُعيدت الوردية للمراجعة" : "")}", "shift", shift.ShiftId, ct);
+            Notifications.NotificationTypes.ShiftLatePayment, "دفعة متأخرة غيّرت نتيجة حساب يومي",
+            $"{cashier}: دفعة أوفلاين وصلت بعد الإغلاق{(reopened ? "، وأُعيد الحساب اليومي للمراجعة" : "")}", "shift", shift.ShiftId, ct);
         await realtime.SendAsync(RealtimeGroups.BranchFinance(shift.BranchId), "shift.closed",
             new { shift_id = shift.ShiftId, user_id = shift.UserId, audit_status = shift.AuditStatus, variance_total = variance, late_payment = true });
         return true;
@@ -128,9 +156,11 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
 
     public async Task<ShiftDto> CloseAsync(Guid shiftId, CloseShiftRequest req, CancellationToken ct)
     {
-        var shift = await db.Shifts.FirstOrDefaultAsync(s => s.ShiftId == shiftId, ct) ?? throw AppException.NotFound("الوردية غير موجودة");
-        if (shift.UserId != current.UserId) throw AppException.Forbidden("يغلق الوردية صاحبها فقط");
-        if (shift.Status != ShiftStatuses.Open) return await ToDtoAsync(shift, ct); // تكرار الإغلاق يعيد نفس النتيجة
+        var shift = await db.Shifts.FirstOrDefaultAsync(s => s.ShiftId == shiftId, ct) ?? throw AppException.NotFound("الحساب اليومي غير موجود");
+        if (shift.UserId != current.UserId) throw AppException.Forbidden("يغلق الحساب اليومي صاحبه فقط");
+        // الحساب المغلق تلقائياً بلا مبلغ معدود: صاحبه يقرّ بما عدّه بنفس الطلب
+        var acknowledging = shift.AutoClosed && shift.DeclaredCash is null && shift.Status == ShiftStatuses.ClosedPendingReview;
+        if (shift.Status != ShiftStatuses.Open && !acknowledging) return await ToDtoAsync(shift, ct); // تكرار الإغلاق يعيد نفس النتيجة
 
         var d = req.Declared;
         new Validator()
@@ -145,8 +175,23 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         // H2: قفل سجل الوردية؛ أي تحصيل/استرجاع/مصروف جارٍ يُكمل أولاً فيُحسب، وما يأتي بعده يُرفض
         await using var tx = await db.BeginTransactionAsync(ct);
         var lockedStatus = (await db.QueryAsync<string>($"SELECT status AS \"Value\" FROM shifts WHERE shift_id = {shift.ShiftId} FOR UPDATE", ct)).Single();
-        if (lockedStatus != ShiftStatuses.Open) // أُغلقت بطلب متزامن
+        if (lockedStatus != ShiftStatuses.Open && !acknowledging) // أُغلق بطلب متزامن
             return await ToDtoAsync(await db.Shifts.AsNoTracking().FirstAsync(s => s.ShiftId == shift.ShiftId, ct), ct);
+
+        // الوصل غير المطبوع لا يمنع الإغلاق، لكن يُطلب لكل واحد إعادة طباعته أو سبب، ويظهر لمحاسب الفرع
+        var unprinted = await db.Receipts.Where(r => r.ShiftId == shift.ShiftId && r.PrintedAt == null && !r.IssuedOffline).ToListAsync(ct);
+        string? ReasonFor(Guid id) => req.UnprintedReasons is { } m && m.TryGetValue(id, out var why) && !string.IsNullOrWhiteSpace(why) ? why.Trim() : null;
+        var missing = unprinted.Where(r => ReasonFor(r.ReceiptId) is null && string.IsNullOrWhiteSpace(r.UnprintedReason)).ToList();
+        if (missing.Count > 0)
+            throw new AppException(422, "UNPRINTED_RECEIPTS", "وصولات غير مطبوعة", "أعد طباعة كل وصل أو اكتب سبب عدم طباعته")
+            {
+                Extensions = new Dictionary<string, object?>
+                {
+                    ["unprinted_receipts"] = missing.Select(r => new { receipt_id = r.ReceiptId, receipt_number = r.ReceiptNumber, total = r.Total }).ToList(),
+                },
+            };
+        foreach (var r in unprinted)
+            if (ReasonFor(r.ReceiptId) is { } why) r.UnprintedReason = why.Length > 500 ? why[..500] : why;
 
         var totals = await TotalsAsync(shift, ct);
         shift.DeclaredCash = d!.Cash;
@@ -162,10 +207,12 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         var variance = shift.VarianceCash.Value + shift.VariancePos.Value;
         shift.AuditStatus = variance == 0 ? "MATCHED" : variance < 0 ? "SHORTAGE" : "OVERAGE";
         shift.Status = ShiftStatuses.ClosedPendingReview;
-        shift.ClosedAt = clock.UtcNow;
-        audit.Add("SHIFT_CLOSED", "shift", shift.ShiftId, after: new
+        shift.ClosedAt ??= clock.UtcNow;
+        await RecordLiabilityAsync(shift, variance, ct);
+        audit.Add(acknowledging ? "SHIFT_AUTO_CLOSE_ACKNOWLEDGED" : "SHIFT_CLOSED", "shift", shift.ShiftId, after: new
         {
             shift.DeclaredCash, shift.DeclaredPosTotal, shift.ExpectedCash, shift.ExpectedPos, shift.AuditStatus, variance,
+            unprinted = unprinted.Select(r => new { r.ReceiptNumber, r.UnprintedReason }),
         }, reason: shift.CloseNote);
         await db.SaveChangesAsync(ct);
         if (tx is not null) await tx.CommitAsync(ct);
@@ -177,7 +224,7 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         {
             var cashier = await db.Users.Where(u => u.UserId == shift.UserId).Select(u => u.FullName).FirstAsync(ct);
             await notifications.NotifyUsersAsync((await notifications.FinanceUsersAsync(shift.BranchId, ct)).Where(u => u != shift.UserId),
-                shift.BranchId, Notifications.NotificationTypes.ShiftClosedWithVariance, variance < 0 ? "وردية مغلقة بعجز" : "وردية مغلقة بزيادة",
+                shift.BranchId, Notifications.NotificationTypes.ShiftClosedWithVariance, variance < 0 ? "حساب يومي مغلق بعجز" : "حساب يومي مغلق بزيادة",
                 $"{cashier}: {Math.Abs(variance):N0} د.ع", "shift", shift.ShiftId, ct);
         }
         return await ToDtoAsync(shift, ct);
@@ -199,7 +246,7 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                 open ? null : shift.VarianceCash ?? Variance(shift.DeclaredCash, totals.ExpectedCash)),
             new("pos", open ? totals.ExpectedPos : shift.ExpectedPos ?? totals.ExpectedPos, shift.DeclaredPosTotal,
                 open ? null : shift.VariancePos ?? Variance(shift.DeclaredPosTotal, totals.ExpectedPos)),
-            new("online", 0, null, null),
+            new("online", await ElectronicForCheckInsAsync(shift, ct), null, null),
         };
         var denominations = shift.CashDenominations is null ? null : JsonSerializer.Deserialize<Dictionary<string, int>>(shift.CashDenominations);
         var point = shift.ClinicId is { } pid ? await db.Clinics.AsNoTracking().FirstOrDefaultAsync(c => c.ClinicId == pid, ct) : null;
@@ -212,6 +259,10 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             ClinicId = shift.ClinicId,
             ClinicName = point?.Name,
             Department = point?.Department,
+            UnprintedReceipts = await UnprintedAsync(shift, ct),
+            AutoClosed = shift.AutoClosed,
+            ElectronicForCheckIns = lines[2].Expected,
+            UnpaidCount = await UnpaidCountAsync(shift, ct),
         };
     }
 
@@ -223,17 +274,25 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             .Check(shift.AuditStatus == "MATCHED" || !string.IsNullOrWhiteSpace(req.Note), "note", "اكتب ملاحظة عند وجود فرق")
             .ThrowIfInvalid();
         if (shift.Status == ShiftStatuses.Open)
-            throw new AppException(409, "SHIFT_NOT_CLOSED", "الوردية ما زالت مفتوحة");
+            throw new AppException(409, "SHIFT_NOT_CLOSED", "الحساب اليومي ما زال مفتوحاً");
         if (shift.Status == ShiftStatuses.Reviewed)
-            throw new AppException(409, "SHIFT_ALREADY_REVIEWED", "رُوجعت الوردية مسبقاً");
+            throw new AppException(409, "SHIFT_ALREADY_REVIEWED", "رُوجع الحساب اليومي مسبقاً");
         if (shift.UserId == current.UserId)
-            throw AppException.Forbidden("لا يراجع الموظف ورديته بنفسه");
+            throw AppException.Forbidden("لا يراجع الموظف حسابه بنفسه");
 
         shift.Status = ShiftStatuses.Reviewed;
         shift.ReviewDecision = req.Decision;
         shift.ReviewNote = req.Note?.Trim();
         shift.ReviewedBy = current.UserId;
         shift.ReviewedAt = clock.UtcNow;
+        if (await db.StaffLiabilities.FirstOrDefaultAsync(l => l.ShiftId == shift.ShiftId, ct) is { } liability)
+        {
+            liability.Status = req.Decision!;
+            liability.Note = shift.ReviewNote;
+            liability.ReviewedBy = current.UserId;
+            liability.ReviewedAt = shift.ReviewedAt;
+            liability.UpdatedAt = clock.UtcNow;
+        }
         audit.Add("SHIFT_REVIEWED", "shift", shift.ShiftId, after: new { shift.ReviewDecision, shift.AuditStatus }, reason: shift.ReviewNote);
         await db.SaveChangesAsync(ct);
         return await ReconciliationAsync(shiftId, ct);
@@ -260,10 +319,131 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             page.SafePage, page.SafePageSize, total);
     }
 
+    /// <summary>
+    /// نهاية اليوم: كل حساب مفتوح من يوم سابق (بتوقيت بغداد) يُغلق تلقائياً «بانتظار إقرار الموظف»، ويُحسب متوقعه،
+    /// ويُبلَّغ المحاسبون وصاحبه. صاحبه يقرّ بالمبلغ المعدود بنفس POST /shifts/{id}/close.
+    /// </summary>
+    public async Task<int> AutoClosePreviousDayAsync(CancellationToken ct)
+    {
+        var start = ClockExtensions.ToUtc(clock.BaghdadToday(), TimeOnly.MinValue);
+        var ids = await db.Shifts.Where(s => s.Status == ShiftStatuses.Open && s.OpenedAt < start).Select(s => s.ShiftId).ToListAsync(ct);
+        var closed = 0;
+        foreach (var id in ids)
+        {
+            await using var tx = await db.BeginTransactionAsync(ct);
+            var status = (await db.QueryAsync<string>($"SELECT status AS \"Value\" FROM shifts WHERE shift_id = {id} FOR UPDATE", ct)).Single();
+            if (status != ShiftStatuses.Open) continue;
+            var shift = await db.Shifts.FirstAsync(s => s.ShiftId == id, ct);
+            var totals = await TotalsAsync(shift, ct);
+            shift.ExpectedCash = totals.ExpectedCash;
+            shift.ExpectedPos = totals.ExpectedPos;
+            shift.ExpectedOnline = 0;
+            shift.Status = ShiftStatuses.ClosedPendingReview;
+            shift.ClosedAt = clock.UtcNow;
+            shift.AutoClosed = true;
+            audit.Add("SHIFT_AUTO_CLOSED", "shift", shift.ShiftId, after: new { shift.ExpectedCash, shift.ExpectedPos, shift.OpenedAt });
+            await db.SaveChangesAsync(ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+            closed++;
+            var cashier = await db.Users.Where(u => u.UserId == shift.UserId).Select(u => u.FullName).FirstAsync(ct);
+            await notifications.NotifyUsersAsync((await notifications.FinanceUsersAsync(shift.BranchId, ct)).Append(shift.UserId).Distinct(), shift.BranchId,
+                Notifications.NotificationTypes.ShiftClosedWithVariance, "حساب يومي أُغلق تلقائياً",
+                $"{cashier}: لم يُغلق حساب يوم سابق. بانتظار إقرار الموظف بالمبلغ المعدود", "shift", shift.ShiftId, ct);
+        }
+        return closed;
+    }
+
+    /// <summary>ذمة الموظف للمحاسب: العجز والزيادة بأسماء الموظفين في الفرع الحالي.</summary>
+    public async Task<PagedResult<StaffLiabilityDto>> LiabilitiesAsync(Guid? userId, string? status, int page, int pageSize, CancellationToken ct)
+    {
+        var q = new PageQuery(page, pageSize);
+        var query = db.StaffLiabilities.AsNoTracking().Where(l => l.BranchId == current.BranchId);
+        if (userId is { } uid) query = query.Where(l => l.UserId == uid);
+        if (!string.IsNullOrWhiteSpace(status)) query = query.Where(l => l.Status == status);
+        var total = await query.CountAsync(ct);
+        var rows = await query.OrderByDescending(l => l.CreatedAt).Skip((q.SafePage - 1) * q.SafePageSize).Take(q.SafePageSize)
+            .Join(db.Users, l => l.UserId, u => u.UserId, (l, u) => new StaffLiabilityDto(l.LiabilityId, l.ShiftId, l.UserId, u.FullName, l.Amount, l.Kind,
+                l.Status, l.Note, l.CreatedAt, l.ReviewedAt)).ToListAsync(ct);
+        return new PagedResult<StaffLiabilityDto>(rows, q.SafePage, q.SafePageSize, total);
+    }
+
+    /// <summary>الفرق عند الإغلاق يُسجَّل باسم الموظف (يُحدَّث إن أُعيد حسابه)، ويُحذف إن صار صفراً.</summary>
+    private async Task RecordLiabilityAsync(Shift shift, long variance, CancellationToken ct)
+    {
+        var existing = await db.StaffLiabilities.FirstOrDefaultAsync(l => l.ShiftId == shift.ShiftId, ct);
+        if (variance == 0)
+        {
+            if (existing is not null) db.StaffLiabilities.Remove(existing);
+            return;
+        }
+        var now = clock.UtcNow;
+        if (existing is null)
+        {
+            existing = new StaffLiability { LiabilityId = UuidV7.New(), ShiftId = shift.ShiftId, BranchId = shift.BranchId, UserId = shift.UserId, CreatedAt = now };
+            db.StaffLiabilities.Add(existing);
+        }
+        existing.Amount = variance;
+        existing.Kind = variance < 0 ? "shortage" : "overage";
+        existing.Status = "pending";
+        existing.UpdatedAt = now;
+    }
+
+    private async Task<List<Guid>> MyCheckInTicketsAsync(Shift s, CancellationToken ct)
+    {
+        var until = s.ClosedAt ?? DateTimeOffset.MaxValue;
+        return await db.QueueTickets.AsNoTracking()
+            .Where(t => t.CheckedInBy == s.UserId && t.BranchId == s.BranchId && t.ArrivedAt >= s.OpenedAt && t.ArrivedAt <= until)
+            .Select(t => t.TicketId).ToListAsync(ct);
+    }
+
+    private async Task<long> ElectronicForCheckInsAsync(Shift s, CancellationToken ct)
+    {
+        var tickets = await MyCheckInTicketsAsync(s, ct);
+        if (tickets.Count == 0) return 0;
+        return await (from a in db.PaymentAllocations
+                      join p in db.Payments on a.PaymentId equals p.PaymentId
+                      join i in db.InvoiceItems on a.InvoiceItemId equals i.InvoiceItemId
+                      where p.OnlinePaymentId != null && i.TicketId != null && tickets.Contains(i.TicketId.Value)
+                      select (long?)a.Amount).SumAsync(ct) ?? 0;
+    }
+
+    private async Task<int> UnpaidCountAsync(Shift s, CancellationToken ct)
+    {
+        var tickets = await MyCheckInTicketsAsync(s, ct);
+        if (tickets.Count == 0) return 0;
+        return await db.InvoiceItems.AsNoTracking()
+            .Where(i => i.TicketId != null && tickets.Contains(i.TicketId.Value) && i.Status == InvoiceItemStatuses.Unpaid)
+            .Select(i => i.TicketId).Distinct().CountAsync(ct);
+    }
+
+    private async Task<List<UnprintedReceiptDto>> UnprintedAsync(Shift s, CancellationToken ct) =>
+        await db.Receipts.AsNoTracking().Where(r => r.ShiftId == s.ShiftId && r.PrintedAt == null && !r.IssuedOffline)
+            .OrderBy(r => r.IssuedAt)
+            .Select(r => new UnprintedReceiptDto(r.ReceiptId, r.ReceiptNumber, r.Type, r.Total, r.IssuedAt, r.UnprintedReason)).ToListAsync(ct);
+
+    private async Task<ShiftSummaryDto> SummaryAsync(Shift s, CancellationToken ct)
+    {
+        var totals = await TotalsAsync(s, ct);
+        var refunds = await db.Refunds.Where(r => r.ShiftId == s.ShiftId && r.Status == RefundStatuses.Completed)
+            .GroupBy(r => 1).Select(g => new { Count = g.Count(), Sum = g.Sum(r => r.Amount) }).FirstOrDefaultAsync(ct);
+        var tickets = await MyCheckInTicketsAsync(s, ct);
+        var electronic = tickets.Count == 0 ? new { Sum = 0L, Count = 0 } : await (
+                from a in db.PaymentAllocations
+                join p in db.Payments on a.PaymentId equals p.PaymentId
+                join i in db.InvoiceItems on a.InvoiceItemId equals i.InvoiceItemId
+                where p.OnlinePaymentId != null && i.TicketId != null && tickets.Contains(i.TicketId.Value)
+                group new { a.Amount, p.PaymentId } by 1 into g
+                select new { Sum = g.Sum(x => x.Amount), Count = g.Select(x => x.PaymentId).Distinct().Count() })
+            .FirstOrDefaultAsync(ct) ?? new { Sum = 0L, Count = 0 };
+        return new ShiftSummaryDto(s.OpeningFloat, totals.CashReceived, totals.CashRefunds, totals.CashExpenses, totals.ExpectedCash,
+            electronic.Sum, electronic.Count, refunds?.Count ?? 0, refunds?.Sum ?? 0, tickets.Count, await UnpaidCountAsync(s, ct),
+            await UnprintedAsync(s, ct), s.OpenedAt < ClockExtensions.ToUtc(clock.BaghdadToday(), TimeOnly.MinValue));
+    }
+
     private async Task<Shift> LoadForReviewAsync(Guid shiftId, CancellationToken ct)
     {
-        var shift = await db.Shifts.FirstOrDefaultAsync(s => s.ShiftId == shiftId, ct) ?? throw AppException.NotFound("الوردية غير موجودة");
-        if (current.Role != Roles.Admin && shift.BranchId != current.BranchId) throw AppException.NotFound("الوردية غير موجودة");
+        var shift = await db.Shifts.FirstOrDefaultAsync(s => s.ShiftId == shiftId, ct) ?? throw AppException.NotFound("الحساب اليومي غير موجود");
+        if (current.Role != Roles.Admin && shift.BranchId != current.BranchId) throw AppException.NotFound("الحساب اليومي غير موجود");
         return shift;
     }
 
@@ -293,6 +473,9 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
     {
         var receipts = await db.Receipts.CountAsync(r => r.ShiftId == s.ShiftId, ct);
         var point = s.ClinicId is { } cid ? await db.Clinics.AsNoTracking().FirstOrDefaultAsync(c => c.ClinicId == cid, ct) : null;
-        return new ShiftDto(s.ShiftId, s.Status, s.OpenedAt, s.ClosedAt, s.OpeningFloat, s.DeviceId, receipts, s.ClinicId, point?.Name, point?.Department);
+        // الملخص لصاحب الحساب فقط (ولا يرى حسابات غيره)
+        var summary = s.UserId == current.UserId ? await SummaryAsync(s, ct) : null;
+        return new ShiftDto(s.ShiftId, s.Status, s.OpenedAt, s.ClosedAt, s.OpeningFloat, s.DeviceId, receipts, s.ClinicId, point?.Name, point?.Department,
+            summary, s.AutoClosed);
     }
 }

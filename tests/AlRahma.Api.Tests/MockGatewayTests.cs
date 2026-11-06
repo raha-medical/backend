@@ -24,6 +24,17 @@ public static class MockPay
     }
 }
 
+/// <summary>الحساب اليومي في الاختبارات: كل وصل يُطبع قبل الإغلاق (POST /receipts/{id}/printed)، كما تفعل الواجهة بعد نجاح الطابعة.</summary>
+public static class DailyAccount
+{
+    public static async Task PrintAllAsync(HttpClient cashier)
+    {
+        var cur = await Api.GetAsync(cashier, "/api/v1/shifts/current");
+        foreach (var r in cur.Body!["summary"]!["unprinted_receipts"]!.AsArray())
+            await Api.PostAsync(cashier, $"/api/v1/receipts/{r!["receipt_id"]!.GetValue<Guid>()}/printed");
+    }
+}
+
 [Collection(ApiCollection.Name)]
 public class MockGatewayTests(TestApp app)
 {
@@ -197,5 +208,21 @@ public class MockGatewayTests(TestApp app)
         Assert.Equal(200, await Post(AlRahma.Application.PatientApp.Gateways.PaymentGatewayRegistry.Sign(secret, body)));
         Assert.Equal("pending", S((await Api.GetAsync(me, $"/api/v1/online-payments/{op}")).Body, "status"));
         Assert.Equal("unpaid", await BookingPaymentAsync(me, booking));
+    }
+
+    [SkippableFact]
+    public async Task Paid_online_booking_final_no_show_becomes_wallet_credit_without_ban()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var (me, patient, booking) = await BookingAsync();
+        var (op, _) = await CreateAsync(me, patient, booking, "zaincash");
+        Assert.Equal("succeeded", S((await MockPay.SucceedAsync(me, op)).Body, "status"));
+        var amount = await app.ScalarAsync<long>($"SELECT amount FROM online_payments WHERE online_payment_id = '{op}'");
+        var ticket = await app.ScalarAsync<Guid>($"SELECT ticket_id FROM queue_tickets WHERE booking_id = '{booking}'");
+        var staff = app.Client(await app.AdminTokenAsync());
+        var noShow = await Api.PostAsync(staff, $"/api/v1/queue/tickets/{ticket}/no-show", new { mode = "final" });
+        Assert.True(noShow.Status == 200, noShow.Raw);
+        Assert.Equal(amount, await app.ScalarAsync<long>($"SELECT COALESCE(sum(amount),0)::bigint FROM patient_credit_ledger WHERE patient_id = '{patient}' AND booking_id = '{booking}'"));
+        Assert.False(await app.ScalarAsync<bool>($"SELECT counted_as_no_show FROM bookings WHERE booking_id = '{booking}'"));
     }
 }

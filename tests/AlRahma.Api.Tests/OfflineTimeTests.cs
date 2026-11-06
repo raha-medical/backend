@@ -42,6 +42,7 @@ public class OfflineTimeTests(TestApp app)
         Assert.True(Math.Abs((arrived.ToUniversalTime() - at.UtcDateTime).TotalSeconds) < 2, $"arrived_at {arrived:o} != occurred_at {at:o}");
 
         // الموظف أغلق ورديته قبل أن يعود الاتصال (والنقد في الدرج): عدّ 25,000
+        await DailyAccount.PrintAllAsync(s.Reception);
         var closed = await Api.PostAsync(s.Reception, $"/api/v1/shifts/{shiftId}/close", new { declared = new { cash = 25000, pos_slips_count = 0, pos_total = 0 } }, Guid.NewGuid());
         Assert.Equal(200, closed.Status);
         Assert.Equal("OVERAGE", await app.ScalarAsync<string>($"SELECT audit_status FROM shifts WHERE shift_id = '{shiftId}'"));

@@ -89,6 +89,11 @@ public class BillingController(PaymentService payments, InvoiceService invoices,
     public Task<PrintPayloadDto> PrintPayload(Guid receiptId, [FromQuery(Name = "copy")] int? copy, CancellationToken ct) =>
         receipts.PrintPayloadAsync(receiptId, copy, ct);
 
+    /// <summary>تسجيل أن الوصل طُبع فعلاً (بعد نجاح الطابعة). يُستدعى من الواجهة بعد كل طباعة.</summary>
+    [HttpPost("api/v1/receipts/{receiptId:guid}/printed")]
+    [Authorize(Policy = Policies.BillingRead)]
+    public async Task<IActionResult> Printed(Guid receiptId, CancellationToken ct) { await receipts.MarkPrintedAsync(receiptId, ct); return NoContent(); }
+
     [HttpPost("api/v1/receipts/{receiptId:guid}/reprint")]
     [Authorize(Policy = Policies.BillingRead)]
     public Task<ReprintResponse> Reprint(Guid receiptId, CancellationToken ct) => receipts.ReprintAsync(receiptId, ct);

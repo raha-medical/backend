@@ -56,6 +56,8 @@ public class SettingsReader(IAppDbContext db)
     public const string RescheduleMinHours = "booking.reschedule_min_hours";
     /// <summary>أين يذهب المبلغ المدفوع إلكترونياً عند الإلغاء: credit (رصيد، السابق) | refund (إرجاع لوسيلة الدفع).</summary>
     public const string CancelPaidTo = "booking.cancel_paid_to";
+    /// <summary>نمط التحصيل للفرع (3.1): central (الافتراضي، كل البنود) | distributed (بنود قسم نقطة الحساب اليومي فقط). الترحيل 020.</summary>
+    public const string CollectionMode = "billing.collection_mode";
     /// <summary>1 = تثبيت الحضور الذاتي بمسح QR شاشة الانتظار مفعل.</summary>
     public const string SelfCheckInEnabled = "checkin.self_enabled";
     /// <summary>نطاق رمز الشاشة: clinic (الحجز في عيادة الشاشة فقط) | branch (أي عيادة في الفرع).</summary>

@@ -66,6 +66,7 @@ public interface IAppDbContext
     DbSet<RadiologyReport> RadiologyReports { get; }
     DbSet<OnlinePayment> OnlinePayments { get; }
     DbSet<MockGatewayTransaction> MockGatewayTransactions { get; }
+    DbSet<StaffLiability> StaffLiabilities { get; }
     DbSet<ReceiptBlock> ReceiptBlocks { get; }
     DbSet<SyncOperation> SyncOperations { get; }
     DbSet<AgentEvent> AgentEvents { get; }

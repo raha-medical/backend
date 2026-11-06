@@ -24,10 +24,24 @@ public class FinanceCore(IAppDbContext db, ICurrentUser current, IClock clock, N
         _ => "clinic",
     };
 
-    /// <summary>وردية الموظف الحالي المفتوحة في الفرع الحالي، أو 409 NO_OPEN_SHIFT.</summary>
-    public async Task<Shift> RequireOpenShiftAsync(CancellationToken ct) =>
-        await OpenShiftOfAsync(current.UserId, ct)
-        ?? throw new AppException(409, "NO_OPEN_SHIFT", "لا توجد وردية مفتوحة", "افتح وردية قبل التحصيل (POST /shifts/open)");
+    /// <summary>
+    /// الحساب اليومي المفتوح للموظف الحالي في الفرع الحالي، أو 409 NO_OPEN_SHIFT.
+    /// حساب من يوم سابق (بتوقيت بغداد) لا يقبل أي تحصيل جديد: 409 SHIFT_FROM_PREVIOUS_DAY (قرار المالك، 4.2-ب).
+    /// </summary>
+    public async Task<Shift> RequireOpenShiftAsync(CancellationToken ct)
+    {
+        var shift = await OpenShiftOfAsync(current.UserId, ct)
+                    ?? throw new AppException(409, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح", "افتح الحساب اليومي قبل التحصيل (POST /shifts/open)");
+        if (IsFromPreviousDay(shift))
+            throw new AppException(409, "SHIFT_FROM_PREVIOUS_DAY", "الحساب اليومي من يوم سابق", "أغلق حساب الأمس وافتح حساب اليوم قبل التحصيل")
+                { Extensions = new Dictionary<string, object?> { ["shift_id"] = shift.ShiftId, ["opened_at"] = shift.OpenedAt } };
+        return shift;
+    }
+
+    /// <summary>فُتح قبل بداية اليوم الحالي بتوقيت بغداد.</summary>
+    public bool IsFromPreviousDay(Shift shift) => shift.OpenedAt < StartOfToday();
+
+    public DateTimeOffset StartOfToday() => ClockExtensions.ToUtc(clock.BaghdadToday(), TimeOnly.MinValue);
 
     public async Task<Shift?> OpenShiftOfAsync(Guid userId, CancellationToken ct) =>
         await db.Shifts.FirstOrDefaultAsync(s => s.UserId == userId && s.BranchId == current.BranchId && s.Status == ShiftStatuses.Open, ct);
@@ -40,7 +54,7 @@ public class FinanceCore(IAppDbContext db, ICurrentUser current, IClock clock, N
     {
         var status = (await db.QueryAsync<string>($"SELECT status AS \"Value\" FROM shifts WHERE shift_id = {shiftId} FOR UPDATE", ct)).SingleOrDefault();
         if (status != ShiftStatuses.Open)
-            throw new AppException(409, "NO_OPEN_SHIFT", "أُغلقت الوردية أثناء العملية", "افتح وردية جديدة وأعد المحاولة");
+            throw new AppException(409, "NO_OPEN_SHIFT", "أُغلق الحساب اليومي أثناء العملية", "افتح حساباً يومياً جديداً وأعد المحاولة");
     }
 
     /// <summary>
@@ -50,9 +64,9 @@ public class FinanceCore(IAppDbContext db, ICurrentUser current, IClock clock, N
     public async Task<Shift> OfflineShiftAsync(Guid shiftId, Guid deviceId, CancellationToken ct)
     {
         var shift = await db.Shifts.FirstOrDefaultAsync(s => s.ShiftId == shiftId && s.BranchId == current.BranchId, ct)
-                    ?? throw new AppException(409, "SHIFT_NOT_FOUND", "وردية العملية الأوفلاين غير موجودة في هذا الفرع");
+                    ?? throw new AppException(409, "SHIFT_NOT_FOUND", "الحساب اليومي للعملية الأوفلاين غير موجود في هذا الفرع");
         if (shift.DeviceId != deviceId && shift.UserId != current.UserId)
-            throw new AppException(409, "SHIFT_DEVICE_MISMATCH", "الوردية ليست لهذا الجهاز", "تحصيل أوفلاين يُزامن من جهاز ورديته فقط");
+            throw new AppException(409, "SHIFT_DEVICE_MISMATCH", "الحساب اليومي ليس لهذا الجهاز", "تحصيل أوفلاين يُزامن من جهاز حسابه اليومي فقط");
         return shift;
     }
 

@@ -214,8 +214,11 @@ public class Part3PolicyTests(TestApp app)
         Assert.Equal(201, (await Api.PostAsync(s.Reception, "/api/v1/payments",
             new { patient_id = patient, invoice_item_ids = new[] { item }, tenders = new[] { new { method = "cash", amount = 25000 } } }, Guid.NewGuid())).Status);
 
-        Assert.Equal(201, (await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
-            new { amount = 5000, method = "cash", reason = "خصم" }, Guid.NewGuid())).Status);
+        // الاسترجاع النقدي اليدوي بموافقة المحاسب أو المشرف دائماً: الإشعار عند الاكتمال
+        var requested = await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
+            new { amount = 5000, method = "cash", reason = "خصم" }, Guid.NewGuid());
+        Assert.Equal("pending_approval", S(requested.Body, "status"));
+        Assert.Equal(200, (await Api.PostAsync(s.Admin, $"/api/v1/refunds/{Id(requested.Body, "refund_id")}/approve")).Status);
         Assert.Equal(1, await NotificationsAsync(patient, "payment.refunded"));
         Assert.Equal(201, (await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
             new { amount = 5000, method = "patient_credit", reason = "رصيد" }, Guid.NewGuid())).Status);

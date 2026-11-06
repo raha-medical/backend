@@ -78,7 +78,9 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         db.Refunds.Add(refund);
         var limit = await settings.GetLongAsync(CashierLimitKey, current.BranchId, 50000, ct);
         string? drawerToken = null;
-        if (isApprover || (refund.Amount <= limit && !methodMismatch))
+        // قرار المالك (أ): الاسترجاع النقدي اليدوي يحتاج دائماً موافقة محاسب الفرع أو المشرف مهما كان المبلغ، والسبب إلزامي.
+        // الحد (refund.cashier_limit) يبقى لغير النقد فقط. الاسترجاع التلقائي بالسياسة (إلغاء الطبيب جدوله) لا يمر من هنا.
+        if (isApprover || (refund.Method != RefundMethods.Cash && refund.Amount <= limit && !methodMismatch))
             drawerToken = await CompleteAsync(refund, item, await ShiftForAsync(refund, null, ct), ct);
         audit.Add("REFUND_REQUESTED", "refund", id, after: new { refund.InvoiceItemId, refund.Amount, refund.Method, refund.Status }, reason: refund.Reason);
         await db.SaveChangesAsync(ct);
@@ -178,7 +180,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         if (refund.Method is not (RefundMethods.Cash or RefundMethods.Pos)) return null;
         if (await finance.OpenShiftOfAsync(current.UserId, ct) is { } mine) return mine;
         if (requester is { } rid && await finance.OpenShiftOfAsync(rid, ct) is { } theirs) return theirs;
-        throw new AppException(409, "NO_OPEN_SHIFT", "لا توجد وردية مفتوحة", "استرجاع النقد أو POS يخرج من درج وردية مفتوحة");
+        throw new AppException(409, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح", "استرجاع النقد أو POS يخرج من حساب يومي مفتوح");
     }
 
     private async Task<string?> CompleteAsync(Refund refund, InvoiceItem item, Shift? shift, CancellationToken ct)

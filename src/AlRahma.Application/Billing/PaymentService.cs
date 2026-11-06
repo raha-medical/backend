@@ -26,7 +26,7 @@ public record DepositResult(Receipt Receipt, string? DrawerToken, bool OpenDrawe
 /// </summary>
 public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, FinanceCore finance,
     IDrawerTokenIssuer drawer, QueueNotifier notifier,
-    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications)
+    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications, SettingsReader settings)
 {
     public async Task<BillableItemsDto> BillableItemsAsync(Guid patientId, string? department, CancellationToken ct)
     {
@@ -110,6 +110,17 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
         if (notPayable.Count > 0)
             throw new AppException(409, "ITEM_NOT_PAYABLE", "بند مدفوع أو ملغى مسبقاً", "حدّث السلة وأعد المحاولة")
                 { Extensions = new Dictionary<string, object?> { ["invoice_item_ids"] = notPayable } };
+
+        // 3.1: في التحصيل الموزّع يُحصَّل من نقطة الحساب اليومي بنود قسمها فقط. المركزي (الافتراضي) يحصّل الكل
+        if (!offlineShift && shift.ClinicId is { } pointId
+            && await settings.GetStringAsync(SettingsReader.CollectionMode, current.BranchId, ct) == "distributed")
+        {
+            var pointDept = await db.Clinics.Where(c => c.ClinicId == pointId).Select(c => c.Department).FirstAsync(ct);
+            var outside = items.Where(i => FinanceCore.DepartmentOf(i.ItemType) != pointDept).Select(i => i.InvoiceItemId).ToList();
+            if (outside.Count > 0)
+                throw new AppException(422, "ITEM_OUTSIDE_COLLECTION_POINT", "البند ليس من قسم نقطة التحصيل", "يُحصَّل في قسمه (التحصيل الموزّع)")
+                    { Extensions = new Dictionary<string, object?> { ["invoice_item_ids"] = outside } };
+        }
 
         var due = items.Sum(i => i.NetPrice);
         var deposit = req.UseDepositCredit ?? 0;

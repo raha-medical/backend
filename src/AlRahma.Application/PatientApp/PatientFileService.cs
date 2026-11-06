@@ -11,6 +11,9 @@ namespace AlRahma.Application.PatientApp;
 public record MyInvoiceItemDto(Guid InvoiceItemId, string ItemType, string ItemTypeAr, string ServiceName, long NetPrice, long RefundedAmount, string Status, string StatusAr, bool Payable);
 public record MyInvoiceDto(Guid InvoiceId, string InvoiceNumber, string BranchName, string Status, string StatusAr, long NetAmount, long PaidAmount, long DueAmount,
     DateTimeOffset CreatedAt, IReadOnlyList<MyInvoiceItemDto> Items);
+/// <summary>رصيد المحفظة: المبلغ المحفوظ للمراجع (إلغاء حجز مدفوع، استرجاع كرصيد، تأمين)، ويُخصم تلقائياً من الدفع في المجمع.</summary>
+public record PatientCreditEntryDto(long Amount, string Kind, string KindAr, string? BranchName, DateTimeOffset CreatedAt);
+public record PatientCreditDto(Guid PatientId, long Balance, string Currency, IReadOnlyList<PatientCreditEntryDto> Recent);
 public record PatientFilePersonDto(Guid PatientId, string FullName, string FileNumber, string Relation, string? Gender, DateOnly? BirthDate, int? Age, bool IsBanned);
 public record PatientFileBranchDto(Guid BranchId, string Name);
 /// <summary>
@@ -50,6 +53,33 @@ public class PatientFileService(IAppDbContext db, IClock clock, PatientPortalSer
     {
         InvoiceItemStatuses.Paid => "مدفوع", InvoiceItemStatuses.Deferred => "مؤجل", InvoiceItemStatuses.PartiallyRefunded => "مسترجع جزئياً", InvoiceItemStatuses.Refunded => "مسترجع", _ => "غير مدفوع",
     };
+
+    private static string CreditKindAr(string kind) => kind switch
+    {
+        "booking_cancel_credit" => "إلغاء حجز مدفوع",
+        "refund_credit" => "استرجاع كرصيد",
+        "applied_to_payment" => "استُخدم في دفع",
+        "refunded_out" => "أُرجع لوسيلة الدفع",
+        "booking_rebook" => "نُقل لحجز جديد",
+        "booking_deposit" => "عربون حجز",
+        "unban_deposit" => "تأمين فك الحظر",
+        _ => "حركة رصيد",
+    };
+
+    /// <summary>رصيد فرد في الحساب وآخر 20 حركة (فحص الربط بالحساب أولاً).</summary>
+    public async Task<PatientCreditDto> CreditAsync(Guid patientId, CancellationToken ct)
+    {
+        await portal.EnsureLinkedAsync(patientId, ct);
+        var balance = await db.PatientCredits.AsNoTracking().Where(c => c.PatientId == patientId).SumAsync(c => (long?)c.Amount, ct) ?? 0;
+        var recent = await (from c in db.PatientCredits.AsNoTracking()
+                            join b in db.Branches.AsNoTracking() on c.BranchId equals b.BranchId into bj
+                            from b in bj.DefaultIfEmpty()
+                            where c.PatientId == patientId
+                            orderby c.CreatedAt descending
+                            select new { c.Amount, c.Kind, BranchName = b == null ? null : b.Name, c.CreatedAt }).Take(20).ToListAsync(ct);
+        return new PatientCreditDto(patientId, balance, "IQD",
+            recent.Select(r => new PatientCreditEntryDto(r.Amount, r.Kind, CreditKindAr(r.Kind), r.BranchName, r.CreatedAt)).ToList());
+    }
 
     /// <summary>فواتير فرد في الحساب من كل الفروع (6). المستحق يستثني المشطوب والطلب المغلق كخارجي أو منتهٍ، كسلة التحصيل.</summary>
     public async Task<IReadOnlyList<MyInvoiceDto>> InvoicesAsync(Guid patientId, CancellationToken ct)

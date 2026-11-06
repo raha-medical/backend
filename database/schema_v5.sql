@@ -1576,3 +1576,33 @@ ALTER TABLE backup_runs DROP CONSTRAINT IF EXISTS ck_backup_runs_offsite_status;
 ALTER TABLE backup_runs ADD CONSTRAINT ck_backup_runs_offsite_status
     CHECK (offsite_status IS NULL OR offsite_status IN ('off', 'pending', 'copied', 'failed'));
 CREATE INDEX IF NOT EXISTS idx_backup_runs_offsite_pending ON backup_runs(created_at) WHERE offsite_status = 'pending';
+
+-- =============================================================================
+-- ترحيل 026: المساعد الذكي: حد يومي (assistant_usage.window_start = بداية اليوم بتوقيت بغداد)، وإحصاءات يومية بلا نصوص، واقتراحات الحجز
+-- =============================================================================
+COMMENT ON COLUMN assistant_usage.window_start IS 'بداية اليوم بتوقيت بغداد (الترحيل 026)';
+CREATE TABLE IF NOT EXISTS assistant_daily_stats (
+    stat_date            DATE PRIMARY KEY,
+    messages             INTEGER NOT NULL DEFAULT 0,
+    patients             INTEGER NOT NULL DEFAULT 0,
+    emergencies          INTEGER NOT NULL DEFAULT 0,
+    refusals             INTEGER NOT NULL DEFAULT 0,
+    limit_hits           INTEGER NOT NULL DEFAULT 0,
+    proposals            INTEGER NOT NULL DEFAULT 0,
+    errors_rate_limited  INTEGER NOT NULL DEFAULT 0,
+    errors_server        INTEGER NOT NULL DEFAULT 0,
+    errors_auth          INTEGER NOT NULL DEFAULT 0,
+    errors_timeout       INTEGER NOT NULL DEFAULT 0,
+    errors_network       INTEGER NOT NULL DEFAULT 0,
+    errors_other         INTEGER NOT NULL DEFAULT 0,
+    latency_ms_total     BIGINT  NOT NULL DEFAULT 0,
+    latency_count        INTEGER NOT NULL DEFAULT 0,
+    latency_ms_max       INTEGER NOT NULL DEFAULT 0,
+    updated_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS assistant_proposals (
+    booking_id          UUID PRIMARY KEY,
+    patient_account_id  UUID NOT NULL REFERENCES patient_accounts(patient_account_id) ON DELETE CASCADE,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_proposals_created ON assistant_proposals(created_at);

@@ -26,6 +26,19 @@ public class AssistantController(AssistantService assistant) : ControllerBase
     public Task<AssistantChatResponse> Chat(AssistantChatRequest req, CancellationToken ct) => assistant.ChatAsync(req, ct);
 }
 
+/// <summary>استخدام المساعد للمدير العام: أرقام يومية فقط، بلا أي نص من المحادثات.</summary>
+[ApiController]
+[Route("api/v1/admin/assistant")]
+[Produces("application/json")]
+[Authorize(Roles = Roles.Admin)]
+public class AdminAssistantController(AssistantService assistant) : ControllerBase
+{
+    [HttpGet("stats")]
+    [ProducesResponseType<AssistantStatsDto>(200)]
+    public Task<AssistantStatsDto> Stats([FromQuery(Name = "from")] DateOnly? from, [FromQuery(Name = "to")] DateOnly? to, CancellationToken ct) =>
+        assistant.StatsAsync(from, to, ct);
+}
+
 /// <summary>قراءة فرع مدير الفرع: إشعارات فرعه وملخص حالة النسخ الاحتياطي.</summary>
 [ApiController]
 [Route("api/v1/branch")]

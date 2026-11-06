@@ -29,7 +29,11 @@ public record UpdateSettingsRequest(Dictionary<string, JsonElement?>? Values);
 /// </summary>
 public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, BranchService branches)
 {
-    private record Definition(string Key, string LabelAr, string Unit, long Default, long Min, long Max, SettingOptionDto[]? Options = null);
+    private record Definition(string Key, string LabelAr, string Unit, long Default, long Min, long Max, SettingOptionDto[]? Options = null)
+    {
+        /// <summary>إعداد عام فقط: لا يظهر في إعدادات الفرع ولا يقبل تخصيصاً له.</summary>
+        public bool GlobalOnly { get; init; }
+    }
 
     private static readonly Definition[] Definitions =
     [
@@ -84,16 +88,19 @@ public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAudi
         new(SettingsReader.AutoCloseAfterMinutes, "إغلاق التسجيل تلقائياً بعد نهاية الوجبة الفعلية", "دقيقة", 120, 0, 600),
         new(SettingsReader.ExtraMaxPercent, "أقصى عدد إضافي فوق السعة (نسبة من سعة الوجبة، 0 = بلا حد)", "%", 50, 0, 300),
         new(SettingsReader.CallAlertRepeats, "عدد مرات تكرار تنبيه \"تفضل للدخول\" (كل دقيقة) إذا لم يضغط المريض \"أنا قادم\"", "مرة", 3, 0, 10),
+        new(SettingsReader.AssistantEnabled, "المساعد الذكي في تطبيق المراجعين (1 مفعل، 0 موقوف)", "", 1, 0, 1) { GlobalOnly = true },
+        new(SettingsReader.AssistantDailyLimit, "حد رسائل المساعد الذكي لكل حساب مراجع في اليوم (رسائل الطوارئ لا تُحسب)", "رسالة", 30, 1, 500) { GlobalOnly = true },
     ];
 
     public async Task<IReadOnlyList<SettingDto>> GetAsync(Guid? branchId, CancellationToken ct)
     {
         if (branchId is { } bid) await EnsureCanReadAsync(bid, ct);
         else EnsureAdmin();
-        var keys = Definitions.Select(d => d.Key).ToList();
+        var visible = Definitions.Where(d => branchId is null || !d.GlobalOnly).ToList();
+        var keys = visible.Select(d => d.Key).ToList();
         var rows = await db.SystemSettings.AsNoTracking()
             .Where(s => keys.Contains(s.Key) && (s.BranchId == null || s.BranchId == branchId)).ToListAsync(ct);
-        return Definitions.Select(d =>
+        return visible.Select(d =>
         {
             var global = Parse(d, rows.FirstOrDefault(r => r.Key == d.Key && r.BranchId == null)?.Value);
             var own = branchId is null ? null : Parse(d, rows.FirstOrDefault(r => r.Key == d.Key && r.BranchId == branchId)?.Value);
@@ -122,6 +129,7 @@ public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAudi
             var isNull = raw is null || raw.Value.ValueKind == JsonValueKind.Null;
             long? value = isNull ? null : ParseInput(def, raw!.Value);
             if (def is null) errors[$"values.{key}"] = ["إعداد غير معروف"];
+            else if (def.GlobalOnly && branchId is not null) errors[$"values.{key}"] = ["إعداد عام فقط"];
             else if (isNull && branchId is null) errors[$"values.{key}"] = ["القيمة العامة مطلوبة"];
             else if (!isNull && value is null)
                 errors[$"values.{key}"] = [def.Options is { } o ? $"القيم المسموحة: {string.Join("، ", o.Select(x => x.Value))}" : "يجب أن تكون رقماً"];

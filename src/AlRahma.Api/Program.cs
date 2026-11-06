@@ -35,8 +35,9 @@ if (!builder.Environment.IsDevelopment() && !builder.Environment.IsEnvironment("
         if (jwtKey.Length < 32 || jwtKey.Contains("change-me", StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("الإنتاج يتطلب Jwt__SigningKey سرياً بطول 32 حرفاً على الأقل (لا القيمة التجريبية).");
         // المساعد: لا تشغيل صامت بمزود تجريبي عند طلب gemini بلا مفتاح
-        if (string.Equals(config["Assistant:Provider"], "gemini", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(config["Assistant:ApiKey"]))
-            throw new InvalidOperationException("Assistant__Provider = gemini يتطلب Assistant__ApiKey في الإنتاج.");
+        if (string.Equals(config["Assistant:Provider"], "gemini", StringComparison.OrdinalIgnoreCase) && string.IsNullOrWhiteSpace(config["Assistant:ApiKey"])
+            && string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(AlRahma.Application.Assistant.AssistantOptions.ApiKeyEnvironmentVariable)))
+            throw new InvalidOperationException("Assistant__Provider = gemini يتطلب Assistant__ApiKey (أو GEMINI_API_KEY) في الإنتاج.");
         if (!string.Equals(config["Assistant:Provider"], "gemini", StringComparison.OrdinalIgnoreCase))
             Console.Error.WriteLine("تحذير: المساعد الذكي بالمزود التجريبي (قواعد بسيطة) في الإنتاج.");
         if ((config["ConnectionStrings:Default"] ?? "").Contains("CHANGE_ME", StringComparison.OrdinalIgnoreCase))

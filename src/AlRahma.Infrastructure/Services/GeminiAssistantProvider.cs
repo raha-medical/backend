@@ -2,14 +2,14 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using AlRahma.Application.Assistant;
-using AlRahma.Application.Common;
 using Microsoft.Extensions.Options;
 
 namespace AlRahma.Infrastructure.Services;
 
 /// <summary>
 /// مزود Gemini عبر REST generateContent مع استدعاء الدوال. المفتاح في الترويسة x-goog-api-key لا في الرابط، فلا يظهر في السجلات،
-/// ولا يعود أي نص من رد الخطأ إلى العميل.
+/// ولا يعود أي نص من رد الخطأ إلى العميل. الأخطاء مصنفة (AssistantProviderException) للإحصاءات.
+/// أجزاء استدعاء الدوال تُعاد حرفياً (RawPart) فتبقى توقيعات التفكير (thoughtSignature) التي تشترطها نماذج Gemini 3.
 /// </summary>
 public class GeminiAssistantProvider(IOptions<AssistantOptions> options, HttpClient http) : IAssistantProvider
 {
@@ -18,21 +18,62 @@ public class GeminiAssistantProvider(IOptions<AssistantOptions> options, HttpCli
     public bool IsSandbox => false;
     public bool SupportsAudio => true;
 
+    /// <summary>
+    /// محاولة ثانية واحدة لكل حالة: 429 أو 503 (ضغط مؤقت عند Google) بعد انتظار قصير، و400 مع thinkingLevel
+    /// بلا إعداد التفكير (بعض النماذج مثل gemini-3.8-flash لا تقبل minimal). بعدها الخطأ المصنف.
+    /// </summary>
     public async Task<AssistantProviderReply> GenerateAsync(AssistantProviderRequest request, CancellationToken ct)
+    {
+        var thinking = Opt.ThinkingLevel;
+        bool retriedThinking = false, retriedBusy = false;
+        while (true)
+        {
+            try { return await SendOnceAsync(request, thinking, ct); }
+            catch (AssistantProviderException e) when (e.HttpStatus == 400 && !string.IsNullOrWhiteSpace(thinking) && !retriedThinking)
+            {
+                retriedThinking = true;
+                thinking = null;
+            }
+            catch (AssistantProviderException e) when ((e.ErrorType == "rate_limited" || e.HttpStatus == 503) && !retriedBusy)
+            {
+                retriedBusy = true;
+                await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(Opt.RateLimitRetrySeconds, 0, 10)), ct);
+            }
+        }
+    }
+
+    private async Task<AssistantProviderReply> SendOnceAsync(AssistantProviderRequest request, string? thinkingLevel, CancellationToken ct)
     {
         using var message = new HttpRequestMessage(HttpMethod.Post, $"{Opt.BaseUrl.TrimEnd('/')}/models/{Uri.EscapeDataString(Opt.Model)}:generateContent")
         {
-            Content = JsonContent.Create(BuildBody(request)),
+            Content = JsonContent.Create(BuildBody(request, thinkingLevel)),
         };
         message.Headers.Add("x-goog-api-key", Opt.ApiKey);
-        using var response = await http.SendAsync(message, ct);
-        if (!response.IsSuccessStatusCode)
-            throw new AppException(503, "ASSISTANT_UNAVAILABLE", "المساعد غير متاح حالياً", "حاول بعد قليل");
-        var body = await response.Content.ReadAsStringAsync(ct);
-        return ParseReply(body);
+        HttpResponseMessage response;
+        try { response = await http.SendAsync(message, ct); }
+        catch (TaskCanceledException) when (!ct.IsCancellationRequested) { throw new AssistantProviderException("timeout", null); }
+        catch (HttpRequestException) { throw new AssistantProviderException("network", null); }
+        using (response)
+        {
+            // النوع ورمز HTTP فقط: نص رد الخطأ لا يُقرأ ولا يُسجل ولا يعود للعميل
+            if (!response.IsSuccessStatusCode)
+                throw new AssistantProviderException(AssistantProviderException.Classify((int)response.StatusCode), (int)response.StatusCode);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            try { return ParseReply(body); }
+            catch (Exception e) when (e is JsonException or InvalidOperationException or KeyNotFoundException)
+            {
+                throw new AssistantProviderException("other", (int)response.StatusCode);
+            }
+        }
     }
 
-    public static JsonObject BuildBody(AssistantProviderRequest request)
+    public JsonObject BuildBody(AssistantProviderRequest request) => BuildBody(request, Opt.ThinkingLevel);
+
+    /// <summary>
+    /// toolConfig بوضع AUTO (النموذج يختار بين الرد والأداة)، وthinkingLevel (minimal افتراضياً للسرعة).
+    /// temperature تبقى افتراضية: توصية Google لنماذج Gemini 3.
+    /// </summary>
+    public static JsonObject BuildBody(AssistantProviderRequest request, string? thinkingLevel)
     {
         var contents = new JsonArray();
         foreach (var c in request.Contents)
@@ -56,12 +97,15 @@ public class GeminiAssistantProvider(IOptions<AssistantOptions> options, HttpCli
             {
                 ["name"] = t.Name, ["description"] = t.Description, ["parameters"] = JsonSerializer.SerializeToNode(t.Parameters),
             });
+        var generation = new JsonObject { ["maxOutputTokens"] = 2048 };
+        if (!string.IsNullOrWhiteSpace(thinkingLevel)) generation["thinkingConfig"] = new JsonObject { ["thinkingLevel"] = thinkingLevel.Trim() };
         return new JsonObject
         {
             ["systemInstruction"] = new JsonObject { ["parts"] = new JsonArray(new JsonObject { ["text"] = request.SystemPrompt }) },
             ["contents"] = contents,
             ["tools"] = new JsonArray(new JsonObject { ["functionDeclarations"] = declarations }),
-            ["generationConfig"] = new JsonObject { ["temperature"] = 0.2, ["maxOutputTokens"] = 1024 },
+            ["toolConfig"] = new JsonObject { ["functionCallingConfig"] = new JsonObject { ["mode"] = "AUTO" } },
+            ["generationConfig"] = generation,
         };
     }
 
@@ -77,7 +121,8 @@ public class GeminiAssistantProvider(IOptions<AssistantOptions> options, HttpCli
         {
             if (part.TryGetProperty("functionCall", out var fn))
                 calls.Add(new AssistantToolCall(fn.GetProperty("name").GetString() ?? "", fn.TryGetProperty("args", out var a) ? a.Clone() : null, part.GetRawText()));
-            else if (part.TryGetProperty("text", out var t)) text += t.GetString();
+            else if (part.TryGetProperty("text", out var t) && !(part.TryGetProperty("thought", out var th) && th.ValueKind == JsonValueKind.True))
+                text += t.GetString();
         }
         return new AssistantProviderReply(text, calls);
     }

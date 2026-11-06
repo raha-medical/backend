@@ -3223,19 +3223,20 @@
 * زر "التوجّه إلى المجمع" يفتح `apple_maps_url` على iOS، و`google_maps_url` على أندرويد والويب: رابط `dir` يفتح تطبيق الخرائط المثبت بمسار جاهز. `geo_uri` لا يُستخدم للزر لأنه يعرض نقطة على الخريطة بلا مسار، ويبقى في الاستجابة لمن يحتاجه.
 
 ### 22.4 المساعد الذكي
-* **من السيرفر فقط:** مفتاح المزود لا يصل المتصفح أبداً. `Assistant__Provider`: `sandbox` (الافتراضي) أو `gemini`، و`Assistant__ApiKey`، و`Assistant__Model`، و`Assistant__MaxMessagesPerHour` (30 لكل حساب).
+* **من السيرفر فقط:** مفتاح المزود لا يصل المتصفح أبداً ولا يظهر في أي رد أو سجل. `Assistant__Provider`: `sandbox` (الافتراضي) أو `gemini`، و`Assistant__ApiKey` (فارغ = يُقرأ من متغير البيئة `GEMINI_API_KEY`)، و`Assistant__Model` (الافتراضي `gemini-3.5-flash-lite`)، و`Assistant__ThinkingLevel` (`minimal` افتراضياً؛ النموذج الذي لا يقبله مثل `gemini-3.8-flash` يرد 400 فيعيد السيرفر الطلب مرة بلا إعداد التفكير، ويعيد مرة واحدة أيضاً عند 429 أو 503)، و`Assistant__TimeoutSeconds` (30). `Assistant__Enabled=false` مفتاح طوارئ تقني.
+* **التشغيل والحد اليومي من لوحة الإدارة** (الإعدادات العامة `GET/PATCH /settings`، الترحيل 026): `assistant.enabled` (1 مفعل، 0 موقوف) و`assistant.daily_limit` (30 رسالة لكل حساب مراجع في اليوم بتوقيت بغداد). إعدادان عامان فقط: لا يظهران في إعدادات الفرع، وتخصيصهما للفرع `400`.
 * `gemini` بلا مفتاح: الإنتاج يرفض التشغيل، وغير الإنتاج يعمل بـ `sandbox`. مزود `sandbox` قواعد بسيطة بلا ذكاء اصطناعي، و`is_sandbox: true` في كل رد: **اعرض على الشاشة أنه تجريبي**.
-* **الخصوصية:** مع `gemini` تُرسل الرسالة وبيانات الأدوات اللازمة للإجابة إلى مزود خارجي. الأدوات لا تعطيه رقم الهاتف ولا رقم الملف.
+* **المفتاح والخصوصية:** مفتاح الطبقة المجانية للتجربة على `alrahma_staging` فقط: في الطبقة المجانية تستخدم Google نصوص الطلبات والردود لتحسين منتجاتها. **قبل أي مراجع حقيقي يجب أن يكون المفتاح من مشروع Google Cloud مفعّل فيه الفوترة.** مع `gemini` تُرسل الرسالة وبيانات الأدوات اللازمة فقط: الاسم الأول، بلا رقم هاتف ولا رقم ملف ولا ملاحظات سريرية، **ولا قيم نتائج ولا نص تقرير أشعة ولا جرعات أو تكرار أو تعليمات أو تركيز دواء**.
 
 #### `GET /assistant/status`
-* **الصلاحية:** `patient`. **Response (200):** `{ "enabled": true, "provider": "sandbox", "is_sandbox": true, "audio_input": false, "max_messages_per_hour": 30, "remaining_this_hour": 30 }`
-* `audio_input: false`: أخفِ زر التسجيل (الوضع التجريبي لا يفهم الصوت).
+* **الصلاحية:** `patient`. **Response (200):** `{ "enabled": true, "provider": "gemini", "is_sandbox": false, "audio_input": true, "daily_limit": 30, "remaining_today": 30, "disclaimer_ar": "..." }`
+* `enabled: false`: **أخفِ زر المساعد** (المدير أوقفه). `audio_input: false`: أخفِ زر التسجيل. `disclaimer_ar`: اعرضه **أعلى المحادثة قبل أول رسالة**.
 
 #### `POST /assistant/chat`
 * **الصلاحية:** `patient`. السيرفر لا يحفظ المحادثة: الواجهة ترسل السجل مع كل رسالة.
 * **Request:**
 ```json
-{ "message": "شكد باقي على موعدي؟",
+{ "message": "أريد أقرب موعد لطبيب أطفال",
   "history": [ { "role": "user", "text": "هلا" }, { "role": "assistant", "text": "هلا بيك، شلون أگدر أساعدك؟" } ],
   "patient_id": null,
   "audio": null }
@@ -3245,19 +3246,46 @@
 * **الرد الصوتي** من جهاز المريض (`speechSynthesis` أو ما يعادله) على نص `reply`، ولا يولده السيرفر.
 * **Response (200):**
 ```json
-{ "reply": "(وضع تجريبي) موعدك القادم مع د. سعد يوم 7 تشرين الثاني 2026 الساعة 8:10 م، رقمك A-025.",
+{ "reply": "جهزتلك حجز عند د. سعد يوم الأحد 8 تشرين الثاني. اضغط «تأكيد الحجز» حتى يتم.",
   "kind": "answer",
-  "provider": "sandbox",
-  "is_sandbox": true,
-  "tools_used": [ "get_my_appointments" ],
-  "remaining_this_hour": 29,
-  "disclaimer_ar": "المساعد لا يشخص ولا يصف علاجاً. لأي استفسار طبي راجع طبيبك." }
+  "provider": "gemini",
+  "is_sandbox": false,
+  "tools_used": [ "find_doctors", "get_doctor_availability", "propose_booking" ],
+  "daily_limit": 30,
+  "remaining_today": 27,
+  "disclaimer_ar": "المساعد يساعدك بالمواعيد والحجز ومعلومات المجمع. ما يشخص ولا يصف علاج أو جرعة...",
+  "proposal": {
+    "booking_id": "0193...", "patient_id": "0193...", "patient_first_name": "زينب", "session_id": "0193...", "doctor_id": "0193...",
+    "doctor_name": "د. سعد", "specialty": "أطفال", "clinic_name": "عيادة الأطفال", "branch_name": "فرع الكرادة",
+    "date": "2026-11-08", "date_ar": "8 تشرين الثاني 2026", "start": "16:00", "end": "20:00", "estimated_time_ar": "4:40 م",
+    "new_visit_price": 25000, "follow_up_price": 10000, "visit_kind": "auto" },
+  "actions": [ { "type": "open_results", "label_ar": "افتح نتائجي", "patient_id": "0193..." } ] }
 ```
-* `kind`: `answer` | `emergency` (أعراض طارئة: اعرض الرسالة بشكل بارز، ولا يُستدعى المزود ولا تُقرأ بيانات) | `medical_advice_refused` | `out_of_scope` | `audio_not_supported`.
-* **القواعد:** بيانات الحساب فقط، وكل أداة تتحقق من الربط بالحساب في السيرفر مهما طلب النموذج. قيم النتائج تظهر فقط إذا سمح شرط الدفع، وإلا يُذكر أنها جاهزة والمبلغ المطلوب. لا تشخيص ولا علاج. بيانات الأدوات تُعامل كبيانات لا كتعليمات.
-* **التدقيق:** لكل استدعاء أداة `ASSISTANT_TOOL_CALL` (`entity_type: "assistant"`، معرف الحساب، اسم الأداة، ونجاحها)، بلا نص الرسائل.
-* **الأدوات:** `list_family_members`، `get_my_appointments`، `get_my_prescriptions`، `get_my_lab_imaging_status`، `get_order_result`، `get_branch_info`.
-* **الأخطاء:** `400 VALIDATION_ERROR`، `404 PATIENT_NOT_FOUND`، `413 ASSISTANT_AUDIO_TOO_LARGE`، `429 RATE_LIMITED` (مع `retry_after_seconds`)، `503 ASSISTANT_UNAVAILABLE`.
+* `kind`: `answer` | `emergency` (أعراض طارئة: اعرض الرسالة بشكل بارز مع رقم الإسعاف 122؛ قائمة السيرفر تُفحص قبل المزود فلا يُستدعى، والنموذج يغطي ما تفوته القائمة) | `medical_advice_refused` | `other_person_refused` (طلب بيانات شخص خارج الحساب) | `out_of_scope` | `audio_not_supported`.
+* **`proposal` (حقل جديد، قد يكون `null`): المساعد لا يحجز أبداً.** اعرض بطاقة الاقتراح وزر «تأكيد الحجز» الذي يرسل من التطبيق `POST /bookings` بالقيم نفسها: `{ "booking_id", "patient_id", "session_id", "visit_kind" }` (و`Idempotency-Key` = `booking_id`). `visit_kind` في الاقتراح `auto` دائماً: المراجع لا يحدد نوع الزيارة (`new_visit`/`follow_up` من المراجع = `403`). الحجز المؤكد بهذا `booking_id` يُحسب في `confirmed_bookings` بإحصاءات الإدارة.
+* **`actions` (حقل جديد، مصفوفة):** أزرار تفتح شاشات التطبيق: `open_results` (النتائج في ملف الفرد `patient_id`)، `open_prescriptions`، `open_invoices`، `open_support` (طلب دعم). القيم الطبية تُقرأ في التطبيق فقط ولا تمر عبر المساعد.
+* **القواعد:** بيانات الحساب فقط، وكل أداة تتحقق من الربط بالحساب في السيرفر مهما طلب النموذج. التحاليل والأشعة: «جاهزة» أو «تنفتح بعد دفع X» مع زر `open_results`. لا تشخيص ولا علاج ولا جرعة: تعليمات النظام + **فحص الرد في السيرفر** (رد فيه جرعة أو تكرار أو أمر بأخذ دواء يُستبدل برسالة الرفض). اختيار التخصص من وصف الشكوى بلا تشخيص. الرد بلغة المراجع (الافتراضي عامية عراقية). بيانات الأدوات تُعامل كبيانات لا كتعليمات.
+* **الحد اليومي:** `assistant.daily_limit` لكل حساب في اليوم (بتوقيت بغداد). رسائل الطوارئ وأعطال المزود لا تُحسب.
+* **التدقيق:** لكل استدعاء أداة `ASSISTANT_TOOL_CALL` (`entity_type: "assistant"`، معرف الحساب، اسم الأداة، ونجاحها)، بلا نص الرسائل. السجل عند تعطل المزود: نوع الخطأ ورمز HTTP فقط.
+* **الأدوات:** `list_family_members`، `get_my_appointments`، `get_my_prescriptions` (أسماء الأدوية فقط)، `get_my_lab_imaging_status` (بلا قيم)، `get_my_invoices`، `get_my_credit`، `get_branch_info` (مع واتساب ورابط الخريطة)، `list_specialties`، `find_doctors`، `get_doctor_availability`، `propose_booking` (اقتراح فقط)، `search_faq`، `get_payment_methods`. أُزيلت `get_order_result`.
+* **الأخطاء:** `400 VALIDATION_ERROR`، `404 PATIENT_NOT_FOUND`، `413 ASSISTANT_AUDIO_TOO_LARGE`، `429 RATE_LIMITED` (رسالة لطيفة، مع `retry_after_seconds` حتى منتصف ليل بغداد و`daily_limit`)، `503 ASSISTANT_DISABLED` (أوقفه المدير)، `503 ASSISTANT_UNAVAILABLE` (تعطل المزود، رسالة لطيفة؛ التطبيق يعمل طبيعياً).
+
+#### `GET /admin/assistant/stats?from=2026-11-01&to=2026-11-06`
+* **الصلاحية:** `admin`. الافتراضي آخر 14 يوماً، وأقصى فترة 92 يوماً (وإلا `400`). **أرقام فقط، بلا أي نص من المحادثات** (جدول `assistant_daily_stats`، الترحيل 026).
+* **Response (200):**
+```json
+{ "from": "2026-11-01", "to": "2026-11-06", "enabled": true, "daily_limit": 30, "provider": "gemini", "model": "gemini-3.5-flash-lite",
+  "totals": { "date": "2026-11-06", "messages": 120, "patients": 41, "emergencies": 2, "refusals": 9, "limit_hits": 1, "proposals": 14,
+              "confirmed_bookings": 11, "errors": { "rate_limited": 0, "server": 1, "auth": 0, "timeout": 0, "network": 0, "other": 0 },
+              "avg_latency_ms": 2300, "max_latency_ms": 7900 },
+  "days": [ { "date": "2026-11-06", "messages": 30, "...": "نفس الحقول" } ] }
+```
+* `patients`: حسابات راسلت المساعد في اليوم (في `totals` مجموع الأيام). `refusals`: رفض نصيحة طبية أو بيانات شخص آخر أو خارج الاختصاص. `errors.auth`: 400/401/403 من المزود (مثل مفتاح خاطئ). `model`: `null` مع `sandbox`.
+
+#### `GET /me/patients/{patientId}/credit`
+* **الصلاحية:** `patient`، والفرد مربوط بالحساب وإلا `404`. رصيد المحفظة (يُخصم تلقائياً من الدفع في المجمع).
+* **Response (200):** `{ "patient_id": "...", "balance": 10000, "currency": "IQD", "recent": [ { "amount": 15000, "kind": "booking_cancel_credit", "kind_ar": "إلغاء حجز مدفوع", "branch_name": "فرع الكرادة", "created_at": "2026-11-06T10:00:00Z" } ] }`
+* `recent`: آخر 20 حركة، والموجب إضافة والسالب استخدام. `kind`: `booking_cancel_credit` | `refund_credit` | `applied_to_payment` | `refunded_out` | `booking_rebook` | `booking_deposit` | `unban_deposit`.
 
 ---
 
@@ -3615,3 +3643,4 @@
 | المرحلة 3: الحجز والحضور والمزامنة (الترحيل 011) | الإلغاء فقط (غياب إذا تأخر، المدفوع رصيد) | تثبيت الحضور الذاتي بـ QR دوار على شاشة الانتظار (`GET /public/displays/{id}/checkin-token`، `POST /bookings/{id}/self-check-in`، `POST /me/self-check-in`)، جدول مرضى اليوم `GET /reception/today` بحالة موحدة وحالة دفع وأزرار، سياسة لكل فرع (رسوم إلغاء متأخر كبند في السلة، الاحتساب غياباً قابل للتعطيل، رصيد أو إرجاع، حد ومهلة تغيير الموعد)، `cancel-preview` و`reschedule-preview` و`POST /bookings/{id}/reschedule`، إعفاء الموظف بـ `bookings.policy_override` وسبب، حقول جديدة في كائن الحجز ورد الإلغاء، وأحداث `booking.changed` و`display.updated` و`my_queue.updated`. كلها إضافات: الحقول والسلوك السابق باقٍ بالقيم الافتراضية |
 | المالية والخريطة (المرحلتان 6 و7، الترحيلان 015 و016) | لا يوجد | أنظمة الأجور والمستحقات والصرف، الكشف اليومي والشهري، المدفوعات، فواتير المريض، دفع بند واحد إلكترونياً، ولوحة الفروع للمدير العام (القسم 24) |
 | الجزء الثالث (إشعارات وطابور ونسخ احتياطي) | لا يوجد | إشعارات الإرجاع والرصيد، تذكير بالحضور المبكر، "اقترب دورك"، تنبيه "تفضل للدخول" المستمر مع "أنا قادم"، طابوري اليوم، دعوة الحضور المبكر و"في الطريق"، إنهاء واستدعاء التالي (`call_next`، `finish_visit`، `call_policy`، `queue.call_next_by`)، والنسخ الاحتياطي المجاني (القسم 21). كل الإضافات اختيارية بلا كسر، والترحيل 006 |
+| المساعد الذكي، المرحلة 2 (Gemini، الترحيل 026) | حد بالساعة من ملف الإعداد، وقيم النتائج والجرعات تصل للنموذج | حد يومي وتشغيل من الإعدادات العامة (`assistant.enabled`، `assistant.daily_limit`)، أدوات التخصصات والأطباء والمواعيد واقتراح الحجز (`proposal` بلا حجز) والأسئلة الشائعة والدفع والفواتير والرصيد، `actions` لفتح النتائج والوصفات، لا قيم ولا جرعات للنموذج، فحص الرد بعد النموذج، طوارئ أوسع مع 122، `GET /admin/assistant/stats`، `GET /me/patients/{id}/credit` |

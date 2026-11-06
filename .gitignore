@@ -485,6 +485,9 @@ $RECYCLE.BIN/
 
 # كود النسخ الاحتياطي في المشروع (ليس ملفات Visual Studio المؤقتة)
 !src/**/Backups/
+# سكربتات النسخ (Docker/pgBackRest) كانت مخفية بالقاعدة Backup*/ أعلاه (Windows لا يفرق بين الحروف)
+!deploy/backup/
+!deploy/backup/**
 
 # مفتاح توقيع الدرج (يُولد محلياً)
 App_Data/

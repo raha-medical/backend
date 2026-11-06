@@ -3150,6 +3150,18 @@
 * **Request (اختياري):** `{ "type": "full" }` (الافتراضي `incr`؛ و`verify` لاختبار استرجاع، و`files` لنسخ الملفات إذا كان مفعلاً).
 * **Response (202):** `BackupRun` بحالة `requested` و`trigger: "manual"`.
 * **الأخطاء:** `409 BACKUP_IN_PROGRESS` (ومعه `run_id` و`current_status`)، `409 BACKUP_FILES_DISABLED`، `400` نوع غير معروف، `403` لغير المدير العام.
+* الوضع native: النوع يُحفظ `full` دائماً (التحقق والملفات ضمن كل نسخة)، و`verify` أو `files` = `409 BACKUP_FILES_DISABLED`.
+
+### 21.4 الوضع native على Windows (`Backup__Mode=native`)
+* الـ API نفسه ينفذ الطلبات كل دقيقة: `pg_dump -Fc` + `pg_restore --list` + نسخ ملفات التخزين ومفتاح التوقيع، في مجلد داخل `Backup__Path`. التفاصيل: `docs/backup_restore.md`.
+* `GET /status` يضيف: `"native": { "daily_time": "03:00", "next_scheduled_at": "...", "path": "D:\\AlRahmaBackups", "offsite_configured": false, "offsite_available": false, "keep": 14, "timeout_minutes": 10, "files_included": true, "key_included": true }` (null في وضع السكربت).
+* `BackupRun` يضيف: `path`، `files_bytes`، `offsite_status` (`off` | `pending` = بانتظار القرص الخارجي | `copied` | `failed`)، `offsite_path`، `offsite_at`، `deleted_at` (حُذف المجلد بسياسة الاحتفاظ، آخر 14 نسخة).
+* الطلب `requested` أو التشغيل `running` العالق أكثر من 10 دقائق يصبح `failed` (في كل الأوضاع ما دام `Backup__Enabled=true`).
+
+### 21.5 `PUT /api/v1/admin/backups/settings`
+* **Request:** `{ "daily_time": "03:00" }` (HH:mm بتوقيت بغداد). يُحفظ في `system_settings` (`backup.daily_time`) ويُطبق فوراً بلا إعادة تشغيل.
+* **Response (200):** نفس `GET /status`. **الأخطاء:** `400` وقت غير صالح، `403` لغير المدير العام. يُسجل `BACKUP_SETTINGS_UPDATED` في التدقيق.
+* إن كان الخادم مطفأً وقت النسخة اليومية تؤخذ عند أول تشغيل بعده. تغيير الوقت إلى وقت مضى اليوم لا يطلق نسخة فورية.
 
 ---
 

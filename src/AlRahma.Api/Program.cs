@@ -55,7 +55,12 @@ builder.Services.AddScoped<Microsoft.AspNetCore.Authentication.IClaimsTransforma
 builder.Services.AddSignalR().AddJsonProtocol(o =>
     o.PayloadSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower);
 builder.Services.AddSingleton<IRealtime, SignalRRealtime>();
-if (config.GetValue("Jobs:Enabled", true)) builder.Services.AddHostedService<ScheduledJobsWorker>();
+if (config.GetValue("Jobs:Enabled", true))
+{
+    builder.Services.AddHostedService<ScheduledJobsWorker>();
+    // منفذ النسخ الاحتياطي كل دقيقة في عامل مستقل حتى لا تؤخر نسخة طويلة التذكيرات والمهام الأخرى
+    builder.Services.AddHostedService<BackupWorker>();
+}
 
 builder.Services
     .AddControllers(o => o.Filters.Add<PasswordChangeRequiredFilter>())

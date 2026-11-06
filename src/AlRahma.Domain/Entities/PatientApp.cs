@@ -228,6 +228,16 @@ public class BackupRun
     public string? Error { get; set; }
     public DateTimeOffset? AlertedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>النسخ الأصلي (native): مجلد النسخة الكامل.</summary>
+    public string? Path { get; set; }
+    /// <summary>حجم نسخة ملفات التخزين داخل المجلد.</summary>
+    public long? FilesBytes { get; set; }
+    /// <summary>off | pending (بانتظار القرص الخارجي) | copied | failed</summary>
+    public string? OffsiteStatus { get; set; }
+    public string? OffsitePath { get; set; }
+    public DateTimeOffset? OffsiteAt { get; set; }
+    /// <summary>حُذف المجلد بسياسة الاحتفاظ.</summary>
+    public DateTimeOffset? DeletedAt { get; set; }
 }
 
 public static class BackupStatuses

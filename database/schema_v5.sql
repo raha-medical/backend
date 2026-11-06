@@ -1562,3 +1562,17 @@ ALTER TABLE shifts ADD COLUMN IF NOT EXISTS variance_usd BIGINT;
 -- ترحيل 024: اسم الفرع بالإنجليزية (UI-94)
 -- =============================================================================
 ALTER TABLE branches ADD COLUMN IF NOT EXISTS name_en VARCHAR(100);
+
+-- =============================================================================
+-- ترحيل 025: النسخ الاحتياطي الأصلي على Windows (Backup__Mode=native)
+-- =============================================================================
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS path           TEXT;
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS files_bytes    BIGINT;
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS offsite_status VARCHAR(10);
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS offsite_path   TEXT;
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS offsite_at     TIMESTAMPTZ;
+ALTER TABLE backup_runs ADD COLUMN IF NOT EXISTS deleted_at     TIMESTAMPTZ;
+ALTER TABLE backup_runs DROP CONSTRAINT IF EXISTS ck_backup_runs_offsite_status;
+ALTER TABLE backup_runs ADD CONSTRAINT ck_backup_runs_offsite_status
+    CHECK (offsite_status IS NULL OR offsite_status IN ('off', 'pending', 'copied', 'failed'));
+CREATE INDEX IF NOT EXISTS idx_backup_runs_offsite_pending ON backup_runs(created_at) WHERE offsite_status = 'pending';

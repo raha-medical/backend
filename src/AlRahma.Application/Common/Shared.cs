@@ -10,6 +10,9 @@ public record CallPolicyDto(string CallNextBy, bool AutoCallNext);
 /// <summary>إعدادات النظام (system_settings): قيمة الفرع إن وجدت، وإلا القيمة العامة، وإلا الافتراضي.</summary>
 public class SettingsReader(IAppDbContext db)
 {
+    /// <summary>المساعد الذكي (الترحيل 026): إعدادان عامان فقط (لا تخصيص للفرع).</summary>
+    public const string AssistantEnabled = "assistant.enabled";
+    public const string AssistantDailyLimit = "assistant.daily_limit";
     public const string BanNoShowLimit = "ban.no_show_limit";
     public const string BanWindowDays = "ban.window_days";
     public const string UnbanDepositAmount = "ban.unban_deposit_amount";

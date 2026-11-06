@@ -11,6 +11,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.SignalR.Client;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Xunit;
 
@@ -516,7 +517,9 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.True(B(r.Body, "is_sandbox"));
         Assert.Equal("answer", S(r.Body, "kind"));
         Assert.Contains("get_my_appointments", Strings(r.Body!["tools_used"]));
-        Assert.Contains("مريضة المساعد", S(r.Body, "reply"));
+        // الاسم الأول فقط
+        Assert.Contains("مريضة:", S(r.Body, "reply"));
+        Assert.DoesNotContain("مريضة المساعد", S(r.Body, "reply"));
         Assert.DoesNotContain("شخص آخر", r.Raw);
         Assert.False(string.IsNullOrEmpty(S(r.Body, "disclaimer_ar")));
 
@@ -551,11 +554,11 @@ public class QaDefectsAndPhase4Tests(TestApp app)
     }
 
     [SkippableFact]
-    public async Task Assistant_respects_the_payment_gate_for_result_values()
+    public async Task Assistant_never_reads_result_values_or_doses_and_offers_a_button_instead()
     {
         Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
         var (s, branch) = await NewBranchAsync();
-        var (patient, me, _, _) = await AppPatientAsync(s.Reception, "نتيجة المساعد");
+        var (patient, me, token, _) = await AppPatientAsync(s.Reception, "نتيجة المساعد");
         var v = await VisitAsync(s, branch, patient);
         await ReleaseAsync(s, patient, v);
 
@@ -568,33 +571,305 @@ public class QaDefectsAndPhase4Tests(TestApp app)
 
         await app.ExecAsync($"UPDATE invoice_items SET status = 'paid' WHERE invoice_item_id = '{v.LabItem}'");
         var open = await Chat(me, "شنو نتيجة تحليلي؟");
-        Assert.Contains("6.5", S(open.Body, "reply"));
-        Assert.Contains("get_order_result", Strings(open.Body!["tools_used"]));
+        Assert.True(open.Status == 200, open.Raw);
+        Assert.DoesNotContain("6.5", open.Raw);
+        Assert.Contains("جاهزة", S(open.Body, "reply"));
+        Assert.DoesNotContain("get_order_result", Strings(open.Body!["tools_used"]));
+        var action = open.Body!["actions"]!.AsArray().Single(a => S(a, "type") == "open_results")!;
+        Assert.Equal(patient, Id(action, "patient_id"));
+
+        // ما يصل النموذج نفسه: لا قيم، ولا جرعة ولا تكرار ولا تركيز، ولا الاسم الكامل
+        var spy = new ScriptedProvider(_ => [new("get_my_lab_imaging_status", null), new("get_my_prescriptions", null), new("list_family_members", null)]);
+        await using var host = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(spy)));
+        var r = await Chat(Client(host, token), "شنو عندي؟");
+        Assert.True(r.Status == 200, r.Raw);
+        var payload = string.Join("\n", spy.ToolResults);
+        Assert.Contains("Omeprazole", payload);
+        Assert.Contains("result_ready", payload);
+        foreach (var secret in new[] { "6.5", "20mg", "1 cap", "مرتين", "duration", "dose", "frequency", "instructions", "values", "findings", "impression", "نتيجة المساعد", "ملاحظة", "التهاب" })
+            Assert.DoesNotContain(secret, payload);
+    }
+
+    private Task<ApiResult> GlobalSettingAsync(HttpClient admin, string key, long value) =>
+        Api.PatchAsync(admin, "/api/v1/settings", new { values = new Dictionary<string, long> { [key] = value } });
+
+    private static HttpClient Client(WebApplicationFactory<Program> host, string token)
+    {
+        var c = host.CreateClient();
+        c.DefaultRequestHeaders.Authorization = new("Bearer", token);
+        return c;
+    }
+
+    /// <summary>نموذج بسيناريو ثابت: الجولة الأولى تستدعي الأدوات المحددة، والتالية ترد بالنص المحدد. يسجل ما يصله من نتائج الأدوات.</summary>
+    private sealed class ScriptedProvider(Func<AssistantProviderRequest, List<AssistantToolCall>> calls, string finalText = "تم") : IAssistantProvider
+    {
+        public readonly List<string> ToolResults = [];
+        public int Requests;
+        public string Name => "scripted";
+        public bool IsSandbox => false;
+        public bool SupportsAudio => false;
+        public Task<AssistantProviderReply> GenerateAsync(AssistantProviderRequest request, CancellationToken ct)
+        {
+            Requests++;
+            var last = request.Contents[^1];
+            if (last.Role == "tool")
+            {
+                ToolResults.AddRange(last.Results!.Select(x => x.Json));
+                return Task.FromResult(new AssistantProviderReply(finalText, []));
+            }
+            var list = calls(request);
+            return Task.FromResult(new AssistantProviderReply(list.Count == 0 ? finalText : null, list));
+        }
+    }
+
+    private static AssistantToolCall Call(string name, object args) => new(name, JsonSerializer.SerializeToElement(args));
+
+    [SkippableFact]
+    public async Task Assistant_daily_limit_comes_from_admin_settings_per_account_and_never_blocks_emergencies()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var (s, branch) = await NewBranchAsync();
+        var (_, me, _, _) = await AppPatientAsync(s.Reception, "حد الرسائل");
+        var (_, other, _, _) = await AppPatientAsync(s.Reception, "حساب ثاني");
+        Assert.Equal(200, (await GlobalSettingAsync(s.Admin, "assistant.daily_limit", 2)).Status);
+        try
+        {
+            var status = await Api.GetAsync(me, "/api/v1/assistant/status");
+            Assert.Equal(2, status.Body!["daily_limit"]!.GetValue<int>());
+            Assert.Equal(2, status.Body!["remaining_today"]!.GetValue<int>());
+            Assert.False(string.IsNullOrEmpty(S(status.Body, "disclaimer_ar")));
+            Assert.Equal(1, (await Chat(me, "هلا")).Body!["remaining_today"]!.GetValue<int>());
+            // الطوارئ لا تُحسب
+            var emergency = await Chat(me, "نزيف شديد");
+            Assert.Equal("emergency", S(emergency.Body, "kind"));
+            Assert.Contains("122", S(emergency.Body, "reply"));
+            Assert.Equal(1, emergency.Body!["remaining_today"]!.GetValue<int>());
+            Assert.Equal(0, (await Chat(me, "هلا")).Body!["remaining_today"]!.GetValue<int>());
+            var blocked = await Chat(me, "هلا");
+            Assert.Equal(429, blocked.Status);
+            Assert.Equal("RATE_LIMITED", blocked.Code);
+            Assert.Contains("باچر", S(blocked.Body, "title"));
+            Assert.True(blocked.Body!["retry_after_seconds"]!.GetValue<int>() is > 0 and <= 86400);
+            Assert.Equal(0, (await Api.GetAsync(me, "/api/v1/assistant/status")).Body!["remaining_today"]!.GetValue<int>());
+            Assert.Equal("emergency", S((await Chat(me, "طفلي حرارته عالية وهو رضيع")).Body, "kind"));
+            Assert.Equal(200, (await Chat(other, "هلا")).Status);
+            // الحد إعداد عام فقط: لا يظهر في إعدادات الفرع ولا يُخصص لها
+            var branchSettings = await Api.GetAsync(s.Admin, $"/api/v1/branches/{branch}/settings");
+            Assert.DoesNotContain("assistant.", branchSettings.Raw);
+            Assert.Equal(400, (await Api.PatchAsync(s.Admin, $"/api/v1/branches/{branch}/settings", new { values = new Dictionary<string, long> { ["assistant.daily_limit"] = 5 } })).Status);
+            Assert.Contains("assistant.daily_limit", (await Api.GetAsync(s.Admin, "/api/v1/settings")).Raw);
+            // إحصاء اليوم: أرقام فقط، بلا نص
+            var stats = await Api.GetAsync(s.Admin, "/api/v1/admin/assistant/stats");
+            Assert.True(stats.Status == 200, stats.Raw);
+            var today = stats.Body!["days"]!.AsArray().First(d => S(d, "date") == Today.ToString("yyyy-MM-dd"))!;
+            Assert.True(today["limit_hits"]!.GetValue<int>() >= 1);
+            Assert.True(today["emergencies"]!.GetValue<int>() >= 2);
+            Assert.True(today["messages"]!.GetValue<int>() >= 5);
+            Assert.DoesNotContain("نزيف", stats.Raw);
+            Assert.DoesNotContain("هلا", stats.Raw);
+            Assert.True((await Api.GetAsync(me, "/api/v1/admin/assistant/stats")).Status is 401 or 403);
+            Assert.Equal(403, (await Api.GetAsync(s.Reception, "/api/v1/admin/assistant/stats")).Status);
+            Assert.Equal(400, (await Api.GetAsync(s.Admin, "/api/v1/admin/assistant/stats?from=2026-01-01&to=2026-12-31")).Status);
+        }
+        finally
+        {
+            await GlobalSettingAsync(s.Admin, "assistant.daily_limit", 30);
+        }
     }
 
     [SkippableFact]
-    public async Task Assistant_rate_limit_applies_per_account_but_never_blocks_emergencies()
+    public async Task Admin_can_switch_the_assistant_off_and_the_app_is_told_to_hide_it()
     {
         Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
         var (s, _) = await NewBranchAsync();
-        var (_, me, token, _) = await AppPatientAsync(s.Reception, "حد الرسائل");
-        var (_, other, otherToken, _) = await AppPatientAsync(s.Reception, "حساب ثاني");
-        await using var limited = app.Factory.WithWebHostBuilder(b => b.UseSetting("Assistant:MaxMessagesPerHour", "2"));
-        HttpClient Client(string t) { var c = limited.CreateClient(); c.DefaultRequestHeaders.Authorization = new("Bearer", t); return c; }
-        var c1 = Client(token);
-        Assert.Equal(1, (await Chat(c1, "هلا")).Body!["remaining_this_hour"]!.GetValue<int>());
-        Assert.Equal(0, (await Chat(c1, "هلا")).Body!["remaining_this_hour"]!.GetValue<int>());
-        var blocked = await Chat(c1, "هلا");
-        Assert.Equal(429, blocked.Status);
-        Assert.Equal("RATE_LIMITED", blocked.Code);
-        Assert.True(blocked.Body!["retry_after_seconds"]!.GetValue<int>() > 0);
-        Assert.Equal("emergency", S((await Chat(c1, "نزيف شديد")).Body, "kind"));
-        Assert.Equal(200, (await Chat(Client(otherToken), "هلا")).Status);
-        _ = me; _ = other;
+        var (_, me, _, _) = await AppPatientAsync(s.Reception, "إيقاف المساعد");
+        Assert.True(B((await Api.GetAsync(me, "/api/v1/assistant/status")).Body, "enabled"));
+        Assert.Equal(200, (await GlobalSettingAsync(s.Admin, "assistant.enabled", 0)).Status);
+        try
+        {
+            Assert.False(B((await Api.GetAsync(me, "/api/v1/assistant/status")).Body, "enabled"));
+            var r = await Chat(me, "شوكت موعدي؟");
+            Assert.Equal(503, r.Status);
+            Assert.Equal("ASSISTANT_DISABLED", r.Code);
+            Assert.Equal(503, (await Chat(me, "نزيف")).Status);
+            Assert.False(B((await Api.GetAsync(s.Admin, "/api/v1/admin/assistant/stats")).Body, "enabled"));
+        }
+        finally
+        {
+            await GlobalSettingAsync(s.Admin, "assistant.enabled", 1);
+        }
+        Assert.Equal(200, (await Chat(me, "هلا")).Status);
+    }
+
+    [SkippableFact]
+    public async Task Booking_proposal_never_books_and_the_patient_confirms_it_with_the_normal_booking_endpoint()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var (s, branch) = await NewBranchAsync();
+        var (patient, me, token, _) = await AppPatientAsync(s.Reception, "حجز المساعد");
+        var session = await SessionAsync(s, Today.AddDays(2));
+        var (_, _, strangerToken, _) = await AppPatientAsync(s.Reception, "غريب الحجز");
+        var bookings = $"SELECT count(*)::int FROM bookings WHERE patient_id = '{patient}'";
+
+        // الأدوات العامة: التخصصات والأطباء وأقرب موعد من بيانات النظام الحقيقية
+        var tools = new ScriptedProvider(_ =>
+        [
+            Call("list_specialties", new { }), Call("find_doctors", new { branch = (string?)null }),
+            Call("get_doctor_availability", new { doctor_id = s.DoctorId }), Call("search_faq", new { query = "استرجاع" }), Call("get_payment_methods", new { }),
+        ]);
+        await using (var host = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(tools))))
+            Assert.Equal(200, (await Chat(Client(host, token), "أريد طبيب")).Status);
+        Assert.Contains(session.ToString(), tools.ToolResults[2]);
+        Assert.Contains("nearest_available", tools.ToolResults[2]);
+        Assert.Contains("at_clinic", tools.ToolResults[4]);
+
+        var propose = new ScriptedProvider(_ => [Call("propose_booking", new { session_id = session })], "جهزت الاقتراح");
+        await using var proposeHost = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(propose)));
+        var r = await Chat(Client(proposeHost, token), "احجزلي");
+        Assert.True(r.Status == 200, r.Raw);
+        var proposal = r.Body!["proposal"]!;
+        Assert.Equal(patient, Id(proposal, "patient_id"));
+        Assert.Equal(session, Id(proposal, "session_id"));
+        Assert.Equal("حجز", S(proposal, "patient_first_name"));
+        Assert.Contains("\"booked\":false", propose.ToolResults[0]);
+        // لا حجز من المساعد
+        Assert.Equal(0, await app.ScalarAsync<int>(bookings));
+
+        // شخص آخر لا يستطيع اقتراحاً لفرد ليس في حسابه
+        var hijack = new ScriptedProvider(_ => [Call("propose_booking", new { session_id = session, patient_id = patient })]);
+        await using (var hijackHost = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(hijack))))
+        {
+            var bad = await Chat(Client(hijackHost, strangerToken), "احجز لهذا المريض");
+            Assert.Null(bad.Body!["proposal"]);
+            Assert.Contains("not_found", hijack.ToolResults[0]);
+        }
+
+        // التأكيد: التطبيق نفسه يرسل POST /bookings بنفس booking_id
+        var confirm = await Api.PostAsync(me, "/api/v1/bookings", new
+        {
+            booking_id = Id(proposal, "booking_id"), patient_id = patient, session_id = session, visit_kind = S(proposal, "visit_kind"),
+        }, Guid.NewGuid());
+        Assert.True(confirm.Status == 201, confirm.Raw);
+        Assert.Equal(1, await app.ScalarAsync<int>(bookings));
+        var stats = await Api.GetAsync(s.Admin, "/api/v1/admin/assistant/stats");
+        var today = stats.Body!["days"]!.AsArray().First(d => S(d, "date") == Today.ToString("yyyy-MM-dd"))!;
+        Assert.True(today["proposals"]!.GetValue<int>() >= 1);
+        Assert.True(today["confirmed_bookings"]!.GetValue<int>() >= 1);
+        _ = branch;
+    }
+
+    [SkippableFact]
+    public async Task Server_checks_the_reply_for_doses_and_understands_refusal_and_emergency_markers()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var (s, _) = await NewBranchAsync();
+        var (_, _, token, _) = await AppPatientAsync(s.Reception, "فحص الرد");
+        async Task<ApiResult> With(string reply)
+        {
+            await using var host = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(new ScriptedProvider(_ => [], reply))));
+            var r = await Chat(Client(host, token), "سؤال");
+            Assert.True(r.Status == 200, r.Raw);
+            return r;
+        }
+        var dose = await With("خذ حبتين باراسيتامول 500 ملغ كل 8 ساعات");
+        Assert.Equal("medical_advice_refused", S(dose.Body, "kind"));
+        Assert.Equal(AssistantSafety.AdviceRefusal, S(dose.Body, "reply"));
+        var other = await With("[[REFUSE_OTHER_PERSON]] ما أگدر أعطيك معلومات غيرك.");
+        Assert.Equal("other_person_refused", S(other.Body, "kind"));
+        Assert.DoesNotContain("[[", S(other.Body, "reply"));
+        var emergency = await With("[[EMERGENCY]]");
+        Assert.Equal("emergency", S(emergency.Body, "kind"));
+        Assert.Contains("122", S(emergency.Body, "reply"));
+        var before = emergency.Body!["remaining_today"]!.GetValue<int>();
+        Assert.Equal(before, (await With("[[EMERGENCY]] روح للطوارئ")).Body!["remaining_today"]!.GetValue<int>());
+        Assert.Equal("answer", S((await With("موعدك يوم الأحد الساعة 10 صباحاً، رقمك 5")).Body, "kind"));
+        Assert.True(AssistantSafety.LooksLikeTreatmentAdvice("take 2 tablets twice a day"));
+        Assert.False(AssistantSafety.LooksLikeTreatmentAdvice("عندك 3 ملفات و 2 مواعيد"));
+        Assert.Equal("Omeprazole", AssistantSafety.DrugNameOnly("Omeprazole 20mg"));
+        Assert.Equal("Augmentin", AssistantSafety.DrugNameOnly("Augmentin 457mg/5ml"));
+    }
+
+    /// <summary>يجمع كل ما يُكتب في السجل أثناء الاختبار.</summary>
+    private sealed class CaptureLogs : Microsoft.Extensions.Logging.ILoggerProvider
+    {
+        public readonly System.Collections.Concurrent.ConcurrentQueue<string> Lines = new();
+        public Microsoft.Extensions.Logging.ILogger CreateLogger(string category) => new Logger(this);
+        public void Dispose() { }
+        private sealed class Logger(CaptureLogs owner) : Microsoft.Extensions.Logging.ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+            public bool IsEnabled(Microsoft.Extensions.Logging.LogLevel level) => true;
+            public void Log<TState>(Microsoft.Extensions.Logging.LogLevel level, Microsoft.Extensions.Logging.EventId id, TState state, Exception? e, Func<TState, Exception?, string> f) =>
+                owner.Lines.Enqueue(f(state, e) + e);
+        }
+    }
+
+    [SkippableFact]
+    public async Task Gemini_key_never_reaches_the_app_or_the_logs_and_an_outage_gets_a_friendly_message()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        const string key = "AIza-test-secret-key-987654321";
+        var (s, _) = await NewBranchAsync();
+        var (_, _, token, _) = await AppPatientAsync(s.Reception, "مفتاح سري");
+        var logs = new CaptureLogs();
+        await using var host = app.Factory.WithWebHostBuilder(b =>
+        {
+            b.UseSetting("Assistant:Provider", "gemini");
+            b.UseSetting("Assistant:ApiKey", key);
+            b.UseSetting("Assistant:BaseUrl", "http://127.0.0.1:9/v1beta"); // منفذ مغلق: تعطل حقيقي في الشبكة
+            b.UseSetting("Assistant:TimeoutSeconds", "5");
+            b.ConfigureLogging(l => l.AddProvider(logs));
+        });
+        var c = Client(host, token);
+        var status = await Api.GetAsync(c, "/api/v1/assistant/status");
+        Assert.Equal("gemini", S(status.Body, "provider"));
+        Assert.False(B(status.Body, "is_sandbox"));
+        Assert.DoesNotContain(key, status.Raw);
+        var before = status.Body!["remaining_today"]!.GetValue<int>();
+
+        var r = await Chat(c, "شوكت موعدي؟");
+        Assert.Equal(503, r.Status);
+        Assert.Equal("ASSISTANT_UNAVAILABLE", r.Code);
+        Assert.Contains("متعطل مؤقتاً", S(r.Body, "title"));
+        Assert.DoesNotContain(key, r.Raw);
+        // التعطل لا يُحسب من الحد، ويُسجل نوعه فقط
+        Assert.Equal(before, (await Api.GetAsync(c, "/api/v1/assistant/status")).Body!["remaining_today"]!.GetValue<int>());
+        Assert.Contains(logs.Lines, l => l.Contains("network"));
+        Assert.DoesNotContain(logs.Lines, l => l.Contains(key) || l.Contains("شوكت"));
+        var stats = await Api.GetAsync(s.Admin, "/api/v1/admin/assistant/stats");
+        Assert.True(stats.Body!["totals"]!["errors"]!["network"]!.GetValue<int>() >= 1);
+        Assert.DoesNotContain(key, stats.Raw);
+    }
+
+    [SkippableFact]
+    public async Task Patient_reads_the_wallet_balance_of_linked_members_only()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        var (s, branch) = await NewBranchAsync();
+        var (patient, me, token, _) = await AppPatientAsync(s.Reception, "محفظة المراجع");
+        var (stranger, other, _, _) = await AppPatientAsync(s.Reception, "محفظة غيره");
+        await app.ExecAsync($"""
+            INSERT INTO patient_credit_ledger (entry_id, patient_id, branch_id, amount, kind, created_at)
+            VALUES ('{Guid.NewGuid()}', '{patient}', '{branch}', 15000, 'booking_cancel_credit', now()), ('{Guid.NewGuid()}', '{patient}', '{branch}', -5000, 'applied_to_payment', now())
+            """);
+        var r = await Api.GetAsync(me, $"/api/v1/me/patients/{patient}/credit");
+        Assert.True(r.Status == 200, r.Raw);
+        Assert.Equal(10000, L(r.Body, "balance"));
+        Assert.Equal(2, r.Body!["recent"]!.AsArray().Count);
+        Assert.Equal("إلغاء حجز مدفوع", S(r.Body!["recent"]!.AsArray().First(x => L(x, "amount") == 15000), "kind_ar"));
+        Assert.Equal(404, (await Api.GetAsync(other, $"/api/v1/me/patients/{patient}/credit")).Status);
+        Assert.Equal(0, L((await Api.GetAsync(other, $"/api/v1/me/patients/{stranger}/credit")).Body, "balance"));
+        Assert.True((await Api.GetAsync(s.Reception, $"/api/v1/me/patients/{patient}/credit")).Status is 401 or 403);
+
+        var spy = new ScriptedProvider(_ => [Call("get_my_credit", new { })]);
+        await using var host = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(spy)));
+        Assert.Equal(200, (await Chat(Client(host, token), "شكد رصيدي؟")).Status);
+        Assert.Contains("\"balance\":10000", spy.ToolResults[0]);
+        Assert.DoesNotContain("محفظة المراجع", spy.ToolResults[0]);
     }
 
     /// <summary>نموذج مخترق: ينفذ ما يأمره به نص حقن، فيطلب بيانات غيره وأدوات غير موجودة.</summary>
-    private sealed class HostileProvider(Guid victimPatient, Guid victimOrder) : IAssistantProvider
+    private sealed class HostileProvider(Guid victimPatient, Guid victimOrder, Guid victimSession) : IAssistantProvider
     {
         public readonly List<AssistantProviderRequest> Requests = [];
         public string Name => "hostile";
@@ -611,6 +886,9 @@ public class QaDefectsAndPhase4Tests(TestApp app)
                 Call("get_my_prescriptions", new { patient_id = victimPatient }),
                 Call("get_my_lab_imaging_status", new { patient_id = victimPatient }),
                 Call("get_order_result", new { order_item_id = victimOrder }),
+                Call("get_my_invoices", new { patient_id = victimPatient }),
+                Call("get_my_credit", new { patient_id = victimPatient }),
+                Call("propose_booking", new { session_id = victimSession, patient_id = victimPatient }),
                 Call("run_sql", new { query = "select * from patients" }),
             ]));
         }
@@ -624,10 +902,11 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         var (victim, victimApp, _, _) = await AppPatientAsync(s.Reception, "الضحية السرية");
         var v = await VisitAsync(s, branch, victim);
         await ReleaseAsync(s, victim, v);
-        await BookAsync(victimApp, victim, await SessionAsync(s, Today.AddDays(2)));
+        var session = await SessionAsync(s, Today.AddDays(2));
+        await BookAsync(victimApp, victim, session);
         var (_, _, attackerToken, _) = await AppPatientAsync(s.Reception, "المهاجم");
 
-        var hostile = new HostileProvider(victim, v.LabOrder);
+        var hostile = new HostileProvider(victim, v.LabOrder, session);
         await using var host = app.Factory.WithWebHostBuilder(b => b.ConfigureTestServices(x => x.AddSingleton<IAssistantProvider>(hostile)));
         var c = host.CreateClient();
         c.DefaultRequestHeaders.Authorization = new("Bearer", attackerToken);
@@ -639,7 +918,8 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.True(r.Status == 200, r.Raw);
         Assert.Empty(r.Body!["tools_used"]!.AsArray());
         var toolPayloads = string.Join("\n", hostile.Requests.SelectMany(x => x.Contents).SelectMany(x => x.Results ?? []).Select(x => x.Json));
-        Assert.Equal(5, hostile.Requests[1].Contents.SelectMany(x => x.Results ?? []).Count());
+        Assert.Equal(8, hostile.Requests[1].Contents.SelectMany(x => x.Results ?? []).Count());
+        Assert.Null(r.Body!["proposal"]);
         Assert.All(hostile.Requests[1].Contents.SelectMany(x => x.Results ?? []), x => Assert.Contains("not_found", x.Json));
         Assert.DoesNotContain("الضحية", toolPayloads);
         Assert.DoesNotContain("6.5", toolPayloads);
@@ -686,6 +966,8 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.Equal("system text", S(sent["systemInstruction"]!["parts"]![0], "text"));
         Assert.Equal("AQI=", S(sent["contents"]![0]!["parts"]![1]!["inlineData"], "data"));
         Assert.Equal(AssistantTools.Definitions.Count, sent["tools"]![0]!["functionDeclarations"]!.AsArray().Count);
+        Assert.Equal("AUTO", S(sent["toolConfig"]!["functionCallingConfig"], "mode"));
+        Assert.Equal("minimal", S(sent["generationConfig"]!["thinkingConfig"], "thinkingLevel"));
 
         // الجولة الثانية: استدعاء الدالة يُعاد حرفياً ومعه نتيجتها
         var text = new FakeHandler(HttpStatusCode.OK, """{"candidates":[{"content":{"parts":[{"text":"موعدك "},{"text":"غداً"}]}}]}""");
@@ -704,11 +986,16 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         var blocked = await Gemini(new FakeHandler(HttpStatusCode.OK, """{"promptFeedback":{"blockReason":"SAFETY"}}""")).GenerateAsync(new AssistantProviderRequest("s", [], []), default);
         Assert.Equal(AssistantKinds.OutOfScope, blocked.Kind);
 
-        // خطأ المزود لا يعود نصه للعميل
-        var failure = await Assert.ThrowsAsync<AppException>(() =>
+        // خطأ المزود مصنف بالنوع ورمز HTTP فقط، ولا يحمل نص الرد
+        var failure = await Assert.ThrowsAsync<AssistantProviderException>(() =>
             Gemini(new FakeHandler(HttpStatusCode.Forbidden, "API key secret-key-123 not valid")).GenerateAsync(new AssistantProviderRequest("s", [], []), default));
-        Assert.Equal("ASSISTANT_UNAVAILABLE", failure.Code);
-        Assert.DoesNotContain("secret-key-123", failure.Message);
+        Assert.Equal("auth", failure.ErrorType);
+        Assert.Equal(403, failure.HttpStatus);
+        Assert.DoesNotContain("secret-key-123", failure.ToString());
+        Assert.Equal("rate_limited", (await Assert.ThrowsAsync<AssistantProviderException>(() =>
+            Gemini(new FakeHandler(HttpStatusCode.TooManyRequests, "quota")).GenerateAsync(new AssistantProviderRequest("s", [], []), default))).ErrorType);
+        Assert.Equal("server", (await Assert.ThrowsAsync<AssistantProviderException>(() =>
+            Gemini(new FakeHandler(HttpStatusCode.ServiceUnavailable, "busy")).GenerateAsync(new AssistantProviderRequest("s", [], []), default))).ErrorType);
     }
 
     [SkippableFact]
@@ -735,6 +1022,15 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.True(AssistantSafety.IsEmergency("عندي ألم في صدري"));
         Assert.True(AssistantSafety.IsEmergency("نزيف قوي"));
         Assert.False(AssistantSafety.IsEmergency("شوكت موعدي"));
+        Assert.True(AssistantSafety.IsEmergency("ابني وكع وصارت ضربة راس"));
+        Assert.True(AssistantSafety.IsEmergency("انحرگت ايدي بالماي الحار"));
+        Assert.True(AssistantSafety.IsEmergency("طفلي حرارته ٤٠ وهو رضيع"));
+        Assert.True(AssistantSafety.IsEmergency("صارت عنده حساسية وتورم"));
+        Assert.True(AssistantSafety.IsEmergency("مرتي جاها الطلگ"));
+        Assert.True(AssistantSafety.IsEmergency("I have chest pain"));
+        Assert.False(AssistantSafety.IsEmergency("عندي حرقة بالمعدة من أسبوع"));
+        Assert.False(AssistantSafety.IsEmergency("أريد طبيب نسائية للمتابعة"));
+        Assert.Contains("122", AssistantSafety.EmergencyMessage);
         Assert.False(AssistantSafety.IsEmergency(null));
     }
 

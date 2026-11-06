@@ -52,6 +52,12 @@ public static class DependencyInjection
         });
         // المساعد: gemini عند وجود المفتاح، وإلا المزود التجريبي الواضح (الإنتاج يرفض gemini بلا مفتاح في Program.cs)
         services.Configure<AlRahma.Application.Assistant.AssistantOptions>(config.GetSection(AlRahma.Application.Assistant.AssistantOptions.Section));
+        // المفتاح: Assistant__ApiKey، وإلا متغير البيئة GEMINI_API_KEY (يمرره start-native.bat لنافذة الـ API وحدها)
+        services.PostConfigure<AlRahma.Application.Assistant.AssistantOptions>(o =>
+        {
+            if (string.IsNullOrWhiteSpace(o.ApiKey))
+                o.ApiKey = Environment.GetEnvironmentVariable(AlRahma.Application.Assistant.AssistantOptions.ApiKeyEnvironmentVariable)?.Trim() ?? "";
+        });
         services.AddSingleton<AlRahma.Application.Assistant.IAssistantProvider>(sp =>
         {
             var options = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<AlRahma.Application.Assistant.AssistantOptions>>();

@@ -85,6 +85,11 @@ public class MyPatientsController(PatientPortalService portal, ConsultationServi
     [HttpGet("{patientId:guid}/invoices")]
     public async Task<IActionResult> Invoices(Guid patientId, CancellationToken ct) => Ok(new { items = await files.InvoicesAsync(patientId, ct) });
 
+    /// <summary>رصيد محفظة الفرد وآخر حركاته.</summary>
+    [HttpGet("{patientId:guid}/credit")]
+    [ProducesResponseType<PatientCreditDto>(200)]
+    public Task<PatientCreditDto> Credit(Guid patientId, CancellationToken ct) => files.CreditAsync(patientId, ct);
+
     [HttpGet("{patientId:guid}/prescriptions")]
     public async Task<IActionResult> Prescriptions(Guid patientId, CancellationToken ct) =>
         Ok(new { items = await pharmacy.MyPrescriptionsAsync(patientId, ct) });

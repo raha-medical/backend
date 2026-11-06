@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 
 namespace AlRahma.Application.Assistant;
@@ -31,16 +30,24 @@ public class SandboxAssistantProvider : IAssistantProvider
 
     private static AssistantProviderReply FirstStep(string t)
     {
+        if (Has(t, "مراجع ثاني", "مريض ثاني", "شخص ثاني", "جاري", "رقم تلفون", "بيانات غيري", "بيانات مريض"))
+            return Say(AssistantSafety.OtherPersonRefusal, AssistantKinds.OtherPersonRefused);
         // بيانات المريض نفسه تسبق فحص النصيحة: «شنو علاجي» سؤال عن وصفته لا طلب علاج
         if (Has(t, "علاجي", "وصفتي", "وصفاتي", "ادويتي", "دوائي", "دواي")) return Call("get_my_prescriptions");
         if (Has(t, "شنو علاج", "علاج ل", "دواء ل", "دوا ل", "شكد جرعه", "جرعه", "شنو عندي", "شنو مرضي", "شخص", "تشخيص", "اعالج", "شلون اتعالج"))
             return Say(AssistantSafety.AdviceRefusal, AssistantKinds.MedicalAdviceRefused);
+        if (Has(t, "رصيد", "محفظه", "محفظتي")) return Call("get_my_credit");
+        if (Has(t, "فاتوره", "فواتير", "دفعت", "باقي علي", "المتبقي")) return Call("get_my_invoices");
+        if (Has(t, "استرجاع", "ارجاع", "سياسه", "الغاء", "الغي")) return Call("search_faq", new { query = t });
+        if (Has(t, "طرق الدفع", "زين كاش", "كي كارد", "ادفع")) return Call("get_payment_methods");
+        if (Has(t, "تخصص", "اختصاص", "اي طبيب", "يا طبيب")) return Call("list_specialties");
+        if (Has(t, "احجز", "طبيب", "دكتور")) return Call("find_doctors");
         if (Has(t, "وصفه", "وصفات", "دواء", "ادويه")) return Call("get_my_prescriptions");
         if (Has(t, "تحليل", "تحاليل", "فحص", "نتيجه", "نتايج", "اشعه", "سونار", "مفراس", "رنين")) return Call("get_my_lab_imaging_status");
         if (Has(t, "موعد", "مواعيد", "حجز", "حجوزات", "دوري", "طابور", "زيارتي")) return Call("get_my_appointments", new { scope = "upcoming" });
         if (Has(t, "فرع", "فروع", "عنوان", "وين", "دوام", "موقع", "رقم", "تلفون", "هاتف")) return Call("get_branch_info");
         if (Has(t, "عايله", "عائله", "اهلي", "افراد")) return Call("list_family_members");
-        return Say("أگدر أساعدك بمواعيدك، وصفاتك، تحاليلك وأشعتك، ومعلومات الفروع.", AssistantKinds.OutOfScope);
+        return Say("أگدر أساعدك بالتخصصات والأطباء والحجز، ومواعيدك، ووصفاتك، وتحاليلك، وفواتيرك، ومعلومات الفروع.", AssistantKinds.OutOfScope);
     }
 
     private static AssistantProviderReply NextStep(string text, List<AssistantToolResult> results)
@@ -48,15 +55,35 @@ public class SandboxAssistantProvider : IAssistantProvider
         var last = results[^1];
         using var doc = JsonDocument.Parse(last.Json);
         var data = doc.RootElement.GetProperty("untrusted_data");
-        if (data.TryGetProperty("error", out _)) return Say("ما لگيت هذي المعلومات بحسابك.");
+        if (data.TryGetProperty("error", out var error))
+            return Say(error.GetString() == "patient_required" ? "لمن الحجز؟ اختار الفرد من القائمة." : "ما لگيت هذي المعلومات بحسابك.");
         return last.Name switch
         {
             "get_my_appointments" => Say(Appointments(data)),
             "get_my_prescriptions" => Say(Prescriptions(data)),
-            "get_my_lab_imaging_status" => Orders(text, data),
-            "get_order_result" => Say(Result(data)),
+            "get_my_lab_imaging_status" => Say(Orders(data)),
             "get_branch_info" => Say(Branches(data)),
-            "list_family_members" => Say("أفراد حسابك: " + string.Join("، ", Items(data).Select(i => i.GetProperty("name").GetString()))),
+            "list_family_members" => Say("أفراد حسابك: " + string.Join("، ", Items(data).Select(i => S(i, "first_name")))),
+            "list_specialties" => Say("التخصصات المتوفرة: " + string.Join("، ", Items(data).Select(i => S(i, "name"))) + "."),
+            // «احجز»: أول طبيب ثم أقرب وجبة ثم اقتراح (لا حجز)
+            "find_doctors" when Has(text, "احجز") && Items(data).Any() =>
+                Call("get_doctor_availability", new { doctor_id = S(Items(data).First(), "doctor_id") }),
+            "find_doctors" => Say(Items(data).Any()
+                ? "الأطباء: " + string.Join("، ", Items(data).Take(5).Select(d => $"{S(d, "name")} ({S(d, "specialty")})")) + "."
+                : "ما لگيت طبيب بهذا الوصف."),
+            "get_doctor_availability" when Has(text, "احجز") && data.GetProperty("nearest_available").ValueKind == JsonValueKind.Object =>
+                Call("propose_booking", new { session_id = S(data.GetProperty("nearest_available"), "session_id") }),
+            "get_doctor_availability" => Say(data.GetProperty("nearest_available") is { ValueKind: JsonValueKind.Object } n
+                ? $"أقرب موعد {S(n, "weekday_ar")} {S(n, "date_ar")}."
+                : "ما اكو مواعيد متاحة بهالفترة."),
+            "propose_booking" => Say($"جهزتلك حجز عند {S(data, "doctor_name")} يوم {S(data, "date_ar")}. اضغط «تأكيد الحجز» حتى يتم."),
+            "search_faq" => Say(Items(data).Any() ? S(Items(data).First(), "answer") : "ما لگيت جواب، تگدر ترسل طلب دعم من التطبيق."),
+            "get_payment_methods" => Say("تگدر تدفع بالمجمع" + (data.GetProperty("online").GetArrayLength() > 0
+                ? "، أو إلكترونياً: " + string.Join("، ", data.GetProperty("online").EnumerateArray().Select(x => x.GetString())) : "") + "."),
+            "get_my_invoices" => Say(Items(data).Any()
+                ? string.Join(" ", Items(data).Take(3).Select(i => $"فاتورة {S(i, "invoice_number")}: الباقي {i.GetProperty("due").GetInt64():N0} د.ع."))
+                : "ما عندك فواتير."),
+            "get_my_credit" => Say(string.Join(" ", Items(data).Select(i => $"رصيد {S(i, "patient_first_name")}: {i.GetProperty("balance").GetInt64():N0} د.ع."))),
             _ => Say("تم."),
         };
     }
@@ -69,7 +96,7 @@ public class SandboxAssistantProvider : IAssistantProvider
         var list = Items(data).ToList();
         if (list.Count == 0) return "ما عندك مواعيد قادمة.";
         return string.Join(" ", list.Take(5).Select(a =>
-            $"{S(a, "patient_name")}: موعد مع {S(a, "doctor_name")} يوم {S(a, "date_ar")} الساعة {S(a, "time_ar")}، رقمك {S(a, "ticket_number")}."));
+            $"{S(a, "patient_first_name")}: موعد مع {S(a, "doctor_name")} يوم {S(a, "date_ar")} الساعة {S(a, "time_ar")}، رقمك {S(a, "ticket_number")}."));
     }
 
     private static string Prescriptions(JsonElement data)
@@ -78,30 +105,17 @@ public class SandboxAssistantProvider : IAssistantProvider
         if (list.Count == 0) return "ما عندك وصفات مسجلة.";
         return string.Join(" ", list.Take(3).Select(p =>
             $"وصفة {S(p, "prescription_code")} من {S(p, "doctor_name")} ({S(p, "date_ar")}): " +
-            string.Join("، ", p.GetProperty("lines").EnumerateArray().Select(l => S(l, "drug_name"))) + "."));
+            string.Join("، ", p.GetProperty("drug_names").EnumerateArray().Select(l => l.GetString())) + "."));
     }
 
-    private static AssistantProviderReply Orders(string text, JsonElement data)
+    private static string Orders(JsonElement data)
     {
         var list = Items(data).ToList();
-        if (list.Count == 0) return Say("ما عندك تحاليل أو أشعة مطلوبة.");
-        // سؤال عن النتيجة: أول نتيجة جاهزة تمر عبر أداة get_order_result وشرط الدفع فيها
-        var ready = list.FirstOrDefault(o => o.GetProperty("result_ready").GetBoolean());
-        if (Has(text, "نتيجه", "نتايج") && ready.ValueKind == JsonValueKind.Object)
-            return Call("get_order_result", new { order_item_id = S(ready, "order_item_id") });
-        return Say(string.Join(" ", list.Take(5).Select(o => $"{S(o, "service_name")}: {S(o, "status_ar")}.")));
-    }
-
-    private static string Result(JsonElement r)
-    {
-        if (r.TryGetProperty("locked", out var locked) && locked.GetBoolean())
-            return $"نتيجة {S(r, "service_name")} جاهزة، وتنفتح بعد دفع {r.GetProperty("amount_due").GetInt64():N0} د.ع.";
-        if (r.TryGetProperty("ready", out var ready) && !ready.GetBoolean()) return "النتيجة بعد ما جاهزة.";
-        var sb = new StringBuilder($"نتيجة {S(r, "service_name")}: ");
-        if (r.TryGetProperty("values", out var values))
-            sb.Append(string.Join("، ", values.EnumerateArray().Select(v => $"{S(v, "name")} {v.GetProperty("value").GetDecimal()} {S(v, "unit")}".Trim())));
-        sb.Append(S(r, "text_result")).Append(S(r, "impression"));
-        return sb.Append(". ناقشها ويا طبيبك.").ToString();
+        if (list.Count == 0) return "ما عندك تحاليل أو أشعة مطلوبة.";
+        return string.Join(" ", list.Take(5).Select(o =>
+            o.TryGetProperty("opens_after_paying", out var due) && due.ValueKind == JsonValueKind.Number
+                ? $"{S(o, "service_name")}: جاهزة، وتنفتح بعد دفع {due.GetInt64():N0} د.ع."
+                : o.GetProperty("result_ready").GetBoolean() ? $"{S(o, "service_name")}: جاهزة، افتحها من زر النتائج." : $"{S(o, "service_name")}: {S(o, "status_ar")}."));
     }
 
     private static string Branches(JsonElement data)

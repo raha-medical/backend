@@ -28,7 +28,7 @@ public class BranchStructureTests(TestApp app)
         Assert.Equal(400, (await Api.PostAsync(admin, "/api/v1/branches", new { code, name = "x", latitude = 33m }, Guid.NewGuid())).Status);
         var bad = await Api.PostAsync(admin, "/api/v1/branches", new
         {
-            code, name = "x",
+            code, name = "x", latitude = 33.3m, longitude = 44.4m,
             working_hours_schedule = new object[]
             {
                 new { weekday = "sat", shifts = new[] { new { open = "14:00", close = "09:00" } } },
@@ -95,7 +95,7 @@ public class BranchStructureTests(TestApp app)
         var schedule = Week.Select(d => d == TodayCode
             ? (object)new { weekday = d, is_closed = true }
             : new { weekday = d, shifts = new[] { new { open = "00:00", close = "23:59" } } }).ToArray();
-        var branchId = (await Api.PostAsync(admin, "/api/v1/branches", new { code, name = $"فرع الشبكة {code}", working_hours_schedule = schedule }, Guid.NewGuid()))
+        var branchId = (await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code, name = $"فرع الشبكة {code}", working_hours_schedule = schedule }, Guid.NewGuid()))
             .Body!["branch_id"]!.GetValue<Guid>();
         await app.ExecAsync($"""
             INSERT INTO clinics (branch_id, name, department) VALUES

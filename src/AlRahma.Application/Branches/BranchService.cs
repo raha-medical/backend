@@ -22,6 +22,8 @@ public record BranchDto(Guid BranchId, string Code, string Name, string? City, s
 {
     /// <summary>رقم واتساب الفرع (الترحيل 021).</summary>
     public string? Whatsapp { get; init; }
+    /// <summary>الاسم بالإنجليزية (الترحيل 024).</summary>
+    public string? NameEn { get; init; }
 }
 
 /// <summary>مدير الفرع: موظف فعال بدور branch_manager مسند للفرع.</summary>
@@ -38,11 +40,12 @@ public record ClinicDto(Guid ClinicId, Guid BranchId, string Name, string Depart
 }
 
 public record CreateBranchRequest(string? Code, string? Name, string? City, string? Address, string? Phone,
-    decimal? Latitude, decimal? Longitude, string? WorkingHours, List<WorkingDayInput>? WorkingHoursSchedule = null, string? Whatsapp = null);
+    decimal? Latitude, decimal? Longitude, string? WorkingHours, List<WorkingDayInput>? WorkingHoursSchedule = null, string? Whatsapp = null,
+    string? NameEn = null);
 /// <summary>working_hours_schedule: null = بلا تغيير، [] = إلغاء الجدول المهيكل، وإلا الأسبوع كاملاً (الأيام غير المذكورة مغلقة).</summary>
 public record UpdateBranchRequest(string? Name, string? City, string? Address, string? Phone, bool? IsActive,
     decimal? Latitude, decimal? Longitude, string? WorkingHours, bool? CancelBookings, List<WorkingDayInput>? WorkingHoursSchedule = null,
-    string? Whatsapp = null);
+    string? Whatsapp = null, string? NameEn = null);
 public record CreateClinicRequest(string? Name, string? Department, short? Floor);
 /// <summary>free_return_days: null = بلا تغيير، -1 = إعداد الفرع، 0..90 = قيمة العيادة.</summary>
 public record UpdateClinicRequest(string? Name, string? Department, short? Floor, bool? IsActive, short? FreeReturnDays = null);
@@ -177,9 +180,15 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
     {
         if (!IsAdmin && !current.Has(Permissions.BranchesCreate)) EnsureAdmin();
         var code = req.Code?.Trim().ToUpperInvariant();
+        var nameTaken = await NameTakenAsync(req.Name, null, ct);
+        var nameEnTaken = await NameTakenAsync(req.NameEn, null, ct);
         new Validator()
             .Check(code is not null && CodePattern().IsMatch(code), "code", "رمز الفرع: حرف إنجليزي ثم حروف أو أرقام (10 كحد أقصى)، مثل B2")
             .Check(!string.IsNullOrWhiteSpace(req.Name) && req.Name.Trim().Length <= 100, "name", "اسم الفرع مطلوب (100 حرف كحد أقصى)")
+            .Check(!nameTaken, "name", DuplicateName)
+            .Check(req.NameEn is null || req.NameEn.Trim().Length <= 100, "name_en", "100 حرف كحد أقصى")
+            .Check(!nameEnTaken, "name_en", DuplicateName)
+            .Check(req.Latitude is not null && req.Longitude is not null, "latitude", MissingLocation)
             .Check(req.City is null || req.City.Length <= 100, "city", "100 حرف كحد أقصى")
             .Check(req.Address is null || req.Address.Length <= 255, "address", "255 حرفاً كحد أقصى")
             .Check(req.Phone is null || req.Phone.Length <= 30, "phone", "30 حرفاً كحد أقصى")
@@ -195,6 +204,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             BranchId = UuidV7.New(),
             Code = code!,
             Name = req.Name!.Trim(),
+            NameEn = string.IsNullOrWhiteSpace(req.NameEn) ? null : req.NameEn.Trim(),
             City = req.City?.Trim(),
             Address = req.Address?.Trim(),
             Phone = req.Phone?.Trim(),
@@ -224,8 +234,17 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
         if (req.IsActive is not null && !IsAdmin && !current.Has(Permissions.BranchesDelete))
             throw AppException.Forbidden("إيقاف الفرع وإعادة تفعيله للمدير العام فقط");
         var branch = await db.Branches.Include(b => b.Hours).FirstOrDefaultAsync(b => b.BranchId == branchId, ct) ?? throw AppException.NotFound("الفرع غير موجود");
+        // موقع الفرع على الخريطة يحدده المدير العام فقط (مدير الفرع يراه للعرض)
+        var moving = req.Latitude is not null || req.Longitude is not null;
+        if (moving && !IsAdmin && (req.Latitude != branch.Latitude || req.Longitude != branch.Longitude))
+            throw AppException.Forbidden("تحديد موقع الفرع على الخريطة للمدير العام فقط");
+        var nameTaken = req.Name is not null && await NameTakenAsync(req.Name, branchId, ct);
+        var nameEnTaken = req.NameEn is not null && await NameTakenAsync(req.NameEn, branchId, ct);
         new Validator()
             .Check(req.Name is null || (req.Name.Trim().Length is > 0 and <= 100), "name", "اسم الفرع (100 حرف كحد أقصى)")
+            .Check(!nameTaken, "name", DuplicateName)
+            .Check(req.NameEn is null || req.NameEn.Trim().Length <= 100, "name_en", "100 حرف كحد أقصى")
+            .Check(!nameEnTaken, "name_en", DuplicateName)
             .Check(req.City is null || req.City.Length <= 100, "city", "100 حرف كحد أقصى")
             .Check(req.Address is null || req.Address.Length <= 255, "address", "255 حرفاً كحد أقصى")
             .Check(req.Phone is null || req.Phone.Length <= 30, "phone", "30 حرفاً كحد أقصى")
@@ -250,6 +269,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             await closures.CancelSessionsAsync(sessions, "إيقاف الفرع", ct);
         }
         if (req.Name is not null) branch.Name = req.Name.Trim();
+        if (req.NameEn is not null) branch.NameEn = req.NameEn.Trim().Length == 0 ? null : req.NameEn.Trim();
         if (req.City is not null) branch.City = req.City.Trim();
         if (req.Address is not null) branch.Address = req.Address.Trim();
         if (req.Phone is not null) branch.Phone = req.Phone.Trim();
@@ -274,6 +294,17 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             new { branch = ToDto(branch), working_hours_schedule = BranchHours.Schedule(branch.Hours) });
         await db.SaveChangesAsync(ct);
         return (await WithStatusAsync([branch], ct, details: true))[0];
+    }
+
+    private const string DuplicateName = "يوجد فرع آخر بهذا الاسم";
+    private const string MissingLocation = "حدد موقع الفرع على الخريطة";
+
+    /// <summary>الاسم لا يتكرر بين الفروع (بما فيها الموقوفة)، بلا فرق بين الأحرف الكبيرة والصغيرة والمسافات الطرفية.</summary>
+    private async Task<bool> NameTakenAsync(string? name, Guid? except, CancellationToken ct)
+    {
+        var n = name?.Trim().ToLower();
+        if (string.IsNullOrEmpty(n)) return false;
+        return await db.Branches.AnyAsync(b => b.BranchId != except && (b.Name.Trim().ToLower() == n || (b.NameEn != null && b.NameEn.Trim().ToLower() == n)), ct);
     }
 
     private const string LocationError = "خط العرض (latitude بين -90 و 90) والطول (longitude بين -180 و 180) يُرسلان معاً";
@@ -417,6 +448,6 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
     }
 
     private static BranchDto ToDto(Branch b) =>
-        new(b.BranchId, b.Code, b.Name, b.City, b.Address, b.Phone, b.Latitude, b.Longitude, b.WorkingHours, b.IsActive) { Whatsapp = b.Whatsapp };
+        new(b.BranchId, b.Code, b.Name, b.City, b.Address, b.Phone, b.Latitude, b.Longitude, b.WorkingHours, b.IsActive) { Whatsapp = b.Whatsapp, NameEn = b.NameEn };
     private static ClinicDto ToDto(Clinic c) => new(c.ClinicId, c.BranchId, c.Name, c.Department, c.Floor, c.IsActive) { FreeReturnDays = c.FreeReturnDays };
 }

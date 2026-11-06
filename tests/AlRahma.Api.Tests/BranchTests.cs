@@ -14,13 +14,13 @@ public class BranchTests(TestApp app)
         var admin = app.Client(await app.AdminTokenAsync());
         var code = Code();
 
-        var created = await Api.PostAsync(admin, "/api/v1/branches", new { code = code.ToLower(), name = "فرع المنصور", city = "بغداد" }, Guid.NewGuid());
+        var created = await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = code.ToLower(), name = "فرع المنصور", city = "بغداد" }, Guid.NewGuid());
         Assert.Equal(201, created.Status);
         Assert.Equal(code, created.Body!["code"]!.GetValue<string>());
         var id = created.Body!["branch_id"]!.GetValue<Guid>();
 
-        Assert.Equal("DUPLICATE_BRANCH_CODE", (await Api.PostAsync(admin, "/api/v1/branches", new { code, name = "x" }, Guid.NewGuid())).Code);
-        Assert.Equal(400, (await Api.PostAsync(admin, "/api/v1/branches", new { code = "1-ب", name = "x" }, Guid.NewGuid())).Status);
+        Assert.Equal("DUPLICATE_BRANCH_CODE", (await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code, name = "x" }, Guid.NewGuid())).Code);
+        Assert.Equal(400, (await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = "1-ب", name = "x" }, Guid.NewGuid())).Status);
 
         var patch = await Api.PatchAsync(admin, $"/api/v1/branches/{id}", new { phone = "07700000000", is_active = false });
         Assert.Equal(200, patch.Status);
@@ -32,7 +32,26 @@ public class BranchTests(TestApp app)
         Assert.Equal("BRANCH_IN_USE", (await Api.PatchAsync(admin, $"/api/v1/branches/{app.Branch1}", new { is_active = false })).Code);
 
         var (_, manager) = await app.CreateStaffAsync("branch_manager");
-        Assert.Equal(403, (await Api.PostAsync(app.Client(manager), "/api/v1/branches", new { code = Code(), name = "x" }, Guid.NewGuid())).Status);
+        Assert.Equal(403, (await Api.PostAsync(app.Client(manager), "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = Code(), name = "x" }, Guid.NewGuid())).Status);
+
+        // UI-96: لا يُحفظ فرع بلا موقع على الخريطة، ولا باسم مكرر (عربي أو إنجليزي، بلا فرق في الأحرف والمسافات)
+        var noPin = await Api.PostAsync(admin, "/api/v1/branches", new { code = Code(), name = $"فرع بلا موقع {code}" }, Guid.NewGuid());
+        Assert.Equal(400, noPin.Status);
+        Assert.NotNull(noPin.Body!["errors"]!["latitude"]);
+        var dup = await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = Code(), name = " فرع المنصور " }, Guid.NewGuid());
+        Assert.Equal(400, dup.Status);
+        Assert.NotNull(dup.Body!["errors"]!["name"]);
+        var en = await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.31m, longitude = 44.41m, code = Code(), name = $"فرع اليرموك {code}", name_en = $"Yarmouk {code}" }, Guid.NewGuid());
+        Assert.Equal(201, en.Status);
+        Assert.Equal($"Yarmouk {code}", en.Body!["name_en"]!.GetValue<string>());
+        var enId = en.Body!["branch_id"]!.GetValue<Guid>();
+        Assert.Equal(400, (await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = Code(), name = $"yarmouk {code}".ToUpper() }, Guid.NewGuid())).Status);
+        Assert.Equal(400, (await Api.PatchAsync(admin, $"/api/v1/branches/{enId}", new { name = "فرع المنصور" })).Status);
+        Assert.Equal(200, (await Api.PatchAsync(admin, $"/api/v1/branches/{enId}", new { name = $"فرع اليرموك {code}", latitude = 33.32m, longitude = 44.42m })).Status);
+
+        // الفرع لا يُحذف: لا توجد نقطة حذف، والإيقاف وحده متاح وبياناته تبقى
+        Assert.True((await Api.SendAsync(admin, HttpMethod.Delete, $"/api/v1/branches/{enId}")).Status is 404 or 405);
+        Assert.Equal(200, (await Api.GetAsync(admin, $"/api/v1/branches/{id}")).Status);
     }
 
     [SkippableFact]

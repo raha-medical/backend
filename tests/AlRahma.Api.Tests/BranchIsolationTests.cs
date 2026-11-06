@@ -21,7 +21,7 @@ public class BranchIsolationTests(TestApp app)
     {
         var admin = app.Client(await app.AdminTokenAsync());
         var code = "V" + Random.Shared.Next(10000, 99999);
-        var branch = Id((await Api.PostAsync(admin, "/api/v1/branches", new { code, name = $"فرع معزول {code}" }, Guid.NewGuid())).Body, "branch_id");
+        var branch = Id((await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code, name = $"فرع معزول {code}" }, Guid.NewGuid())).Body, "branch_id");
         await app.ExecAsync($"INSERT INTO system_settings (branch_id, key, value) VALUES ('{branch}', 'refund.cashier_limit', '1000')");
         var q = new QueueTests(app);
         var s = await q.SetupAsync(branch, ["expenses.manage"]);
@@ -142,7 +142,7 @@ public class BranchIsolationTests(TestApp app)
         // فلاتر القوائم بفرع آخر: 403 أو قائمة بلا بيانات الفرع
         foreach (var url in new[]
                  {
-                     $"/api/v1/reports/dashboard?branch_id={v.Branch}", $"/api/v1/reports/daily-revenue?branch_id={v.Branch}",
+                     $"/api/v1/reports/dashboard?branch_id={v.Branch}", $"/api/v1/reports/stats?branch_id={v.Branch}", $"/api/v1/reports/daily-revenue?branch_id={v.Branch}",
                      $"/api/v1/reports/no-shows?branch_id={v.Branch}", $"/api/v1/reports/audit-logs?branch_id={v.Branch}",
                      $"/api/v1/reports/branch-settlements?branch_id={v.Branch}", $"/api/v1/reports/doctor-earnings?branch_id={v.Branch}",
                      $"/api/v1/expenses?branch_id={v.Branch}", $"/api/v1/deferrals?branch_id={v.Branch}",

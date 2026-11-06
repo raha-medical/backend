@@ -14,7 +14,7 @@ public class BranchFinanceTests(TestApp app)
         var admin = app.Client(await app.AdminTokenAsync());
         var patient = await new QueueTests(app).PatientAsync(admin);
         var code = "S" + Random.Shared.Next(10000, 99999);
-        var b3 = (await Api.PostAsync(admin, "/api/v1/branches", new { code, name = $"فرع التسوية {code}" }, Guid.NewGuid()))
+        var b3 = (await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code, name = $"فرع التسوية {code}" }, Guid.NewGuid()))
             .Body!["branch_id"]!.GetValue<Guid>();
 
         // عربون 10,000 قُبض في الفرع الأول، استُخدم منه 6,000 في الفرع الجديد

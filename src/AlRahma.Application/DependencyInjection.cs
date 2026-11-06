@@ -31,6 +31,7 @@ public static class DependencyInjection
         services.AddScoped<Reports.RevenueService>();
         services.AddScoped<Reports.DoctorReportService>();
         services.AddScoped<Reports.DashboardService>();
+        services.AddScoped<Reports.StatsService>();
         services.AddScoped<Reports.EntitlementService>();
         services.AddScoped<Reports.AuditLogService>();
         services.AddScoped<DeferralService>();

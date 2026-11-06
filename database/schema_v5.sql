@@ -1557,3 +1557,8 @@ ALTER TABLE shifts ADD COLUMN IF NOT EXISTS declared_usd BIGINT;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS expected_usd BIGINT;
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS variance_usd BIGINT;
 
+
+-- =============================================================================
+-- ترحيل 024: اسم الفرع بالإنجليزية (UI-94)
+-- =============================================================================
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS name_en VARCHAR(100);

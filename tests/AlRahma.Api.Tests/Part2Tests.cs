@@ -168,6 +168,7 @@ public class Part2Tests(TestApp app)
         var rx = await Api.GetAsync(pharmacist, $"/api/v1/pharmacy/prescriptions/{code}");
         Assert.True(rx.Status == 200, rx.Raw);
         var rxId = Id(rx.Body, "prescription_id");
+        await PharmacyTest.BillFreeAsync(pharmacist, rxId);
         var dispense = await Api.PostAsync(pharmacist, $"/api/v1/pharmacy/prescriptions/{rxId}/dispense",
             new { lines = new[] { new { line_no = 1, dispensed = true } } }, Guid.NewGuid());
         Assert.True(dispense.Status == 200, dispense.Raw);

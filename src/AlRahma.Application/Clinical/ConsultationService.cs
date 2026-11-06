@@ -55,8 +55,30 @@ public record VisitDto(Guid ConsultationId, DateOnly Date, string DoctorName, st
 /// التعديل لصاحب المعاينة خلال نافذة (consultation.edit_window_hours)، وبعدها ملحق فقط. private_notes للأطباء فقط.
 /// </summary>
 public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, SettingsReader settings,
-    OrderBilling billing, MedicalOrderSync sync, PatientPortalService portal, Queue.QueueService queue, ReferralTracker referrals)
+    OrderBilling billing, MedicalOrderSync sync, PatientPortalService portal, Queue.QueueService queue, ReferralTracker referrals,
+    Patients.PatientService patients)
 {
+    /// <summary>
+    /// ملف المراجع الخارجي المختصر (الاسم والهاتف): ملف موجود بنفس الهاتف والاسم يُستخدم، وإلا يُنشأ (6.3).
+    /// يُستخدم في الطلب المباشر للمختبر والأشعة وفي صرف الصيدلية للمراجع الخارجي.
+    /// </summary>
+    public async Task<(Guid PatientId, bool Created)> ResolveExternalPatientAsync(Guid? patientId, ExternalPatientInput? input, CancellationToken ct)
+    {
+        if (patientId is { } id) return (id, false);
+        if (input is null)
+            throw AppException.Validation(new Dictionary<string, string[]> { ["patient_id"] = ["اختر المراجع أو أدخل اسم وهاتف المراجع الخارجي"] });
+        if (!current.Has(Domain.Common.Permissions.PatientsWrite) && !current.Has(Domain.Common.Permissions.PharmacyDispense))
+            throw AppException.Forbidden("إنشاء ملف المراجع يتطلب صلاحية تسجيل المرضى");
+        var phone = Common.PhoneNumbers.Normalize(input.PhoneNumber);
+        var name = string.Join(' ', (input.FullName ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries));
+        if (phone is not null && name.Length > 0
+            && await db.Patients.AsNoTracking().Where(p => p.PhoneNumber == phone && p.FullName == name && p.MergedIntoPatientId == null)
+                .Select(p => (Guid?)p.PatientId).FirstOrDefaultAsync(ct) is { } existing)
+            return (existing, false);
+        var created = await patients.CreateAsync(new Patients.CreatePatientRequest(null, input.FullName, input.PhoneNumber, null, null, null, null), ct);
+        return (created.PatientId, true);
+    }
+
     public const int MaxPrescriptionLines = 30;
     public const int MaxOrders = 30;
 
@@ -203,11 +225,14 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
     {
         var items = req.Items ?? [];
         new Validator()
-            .Check(req.PatientId is not null, "patient_id", "المريض مطلوب")
+            .Check(req.PatientId is not null || req.NewPatient is not null, "patient_id", "المريض مطلوب (أو الاسم والهاتف لمراجع خارجي)")
             .Check(items.Count is > 0 and <= MaxOrders, "items", $"من 1 إلى {MaxOrders} طلباً")
             .Check(req.ReferringDoctorName is null || req.ReferringDoctorName.Length <= 150, "referring_doctor_name", "150 حرفاً كحد أقصى")
             .ThrowIfInvalid();
-        var patient = await db.Patients.AsNoTracking().FirstOrDefaultAsync(p => p.PatientId == req.PatientId, ct)
+        // الخدمات تُتحقق قبل إنشاء ملف المراجع الخارجي حتى لا يبقى ملف بلا طلب
+        await billing.ResolveAsync(current.BranchId, items.Select((x, i) => ($"items[{i}]", x, (string?)null)).ToList(), ct);
+        var (patientId, patientCreated) = await ResolveExternalPatientAsync(req.PatientId, req.NewPatient, ct);
+        var patient = await db.Patients.AsNoTracking().FirstOrDefaultAsync(p => p.PatientId == patientId, ct)
                       ?? throw new AppException(404, "PATIENT_NOT_FOUND", "المريض غير موجود");
         if (patient.MergedIntoPatientId is not null) throw new AppException(409, "PATIENT_MERGED", "هذا الملف مدموج في ملف آخر");
         var lines = await billing.ResolveAsync(current.BranchId, items.Select((x, i) => ($"items[{i}]", x, (string?)null)).ToList(), ct);
@@ -220,8 +245,15 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         await sync.SyncAsync(orders.Where(o => o.Status == OrderStatuses.Paid).Select(o => o.InvoiceItemId).ToArray(), ct);
         await referrals.NotifyCreatedAsync(patient.PatientId, orders.Select(o => o.OrderItemId).ToArray(), null, ct);
         var prices = lines.ToDictionary(l => l.Service.ServiceId, l => l.Service);
+        var itemPrices = await db.InvoiceItems.AsNoTracking().Where(i => orders.Select(o => o.InvoiceItemId).Contains(i.InvoiceItemId))
+            .ToDictionaryAsync(i => i.InvoiceItemId, ct);
         return new DirectOrderResponse(orders.Select(o => new DirectOrderItemDto(o.OrderItemId, o.Department, prices[o.ServiceId].Name, o.InvoiceItemId,
-            prices[o.ServiceId].Price, o.Status)).ToList());
+            itemPrices[o.InvoiceItemId].NetPrice, o.Status)).ToList())
+        {
+            PatientId = patient.PatientId, FileNumber = patient.FileNumber, PatientName = patient.FullName, PatientCreated = patientCreated,
+            InvoiceId = itemPrices.Values.FirstOrDefault()?.InvoiceId,
+            TotalDue = itemPrices.Values.Where(i => i.Status == Domain.Entities.InvoiceItemStatuses.Unpaid).Sum(i => i.NetPrice),
+        };
     }
 
     public async Task<CancelOrderResponse> CancelOrderAsync(Guid orderItemId, CancelOrderRequest req, CancellationToken ct)

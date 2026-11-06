@@ -62,6 +62,11 @@ public class PrescriptionLine
     public bool? Dispensed { get; set; }
     public string? SubstituteDrugName { get; set; }
     public string? NotDispensedReason { get; set; }
+    /// <summary>الدواء من الكتالوج (الترحيل 022)، والكمية والسعر وبند الفاتورة بعد التسعير.</summary>
+    public Guid? ServiceId { get; set; }
+    public short? Quantity { get; set; }
+    public long? UnitPrice { get; set; }
+    public Guid? InvoiceItemId { get; set; }
 }
 
 public static class OrderStatuses
@@ -213,4 +218,41 @@ public class RadiologyReport
     public string? Impression { get; set; }
     public Guid ReportedBy { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>سطر في سجل صرف الصيدلية (الترحيل 022): وصفة داخلية أو مراجع خارجي.</summary>
+public class PharmacyDispenseLine
+{
+    public Guid DispenseLineId { get; set; }
+    public Guid BranchId { get; set; }
+    public Guid PatientId { get; set; }
+    public Guid? PrescriptionId { get; set; }
+    public short? LineNo { get; set; }
+    public Guid? InvoiceId { get; set; }
+    public Guid? InvoiceItemId { get; set; }
+    public Guid? ServiceId { get; set; }
+    public string DrugName { get; set; } = "";
+    public short Quantity { get; set; }
+    public long UnitPrice { get; set; }
+    public long Amount { get; set; }
+    /// <summary>billed | dispensed | not_available | not_wanted</summary>
+    public string Status { get; set; } = PharmacyLineStatuses.Billed;
+    public bool IsExternal { get; set; }
+    public Guid? DoctorId { get; set; }
+    public string? ReferringDoctorName { get; set; }
+    public Guid? PrescriptionFileId { get; set; }
+    public string? Note { get; set; }
+    public string? Reason { get; set; }
+    public Guid? CreatedBy { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public Guid? DispensedBy { get; set; }
+    public DateTimeOffset? DispensedAt { get; set; }
+}
+
+public static class PharmacyLineStatuses
+{
+    public const string Billed = "billed";
+    public const string Dispensed = "dispensed";
+    public const string NotAvailable = "not_available";
+    public const string NotWanted = "not_wanted";
 }

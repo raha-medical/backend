@@ -30,6 +30,10 @@ public class Shift
     public long? ExpectedOnline { get; set; }
     public long? VarianceCash { get; set; }
     public long? VariancePos { get; set; }
+    /// <summary>نقد الدولار (الترحيل 023): المعدود والمتوقع والفرق بالدولار.</summary>
+    public long? DeclaredUsd { get; set; }
+    public long? ExpectedUsd { get; set; }
+    public long? VarianceUsd { get; set; }
     public string? AuditStatus { get; set; }
     public Guid? ReviewedBy { get; set; }
     public string? ReviewDecision { get; set; }
@@ -97,6 +101,8 @@ public class Payment
     public long TotalPaid { get; set; }
     public long DepositUsed { get; set; }
     public bool PriceMismatch { get; set; }
+    /// <summary>الفكة المعادة بالدينار (عند الدفع بالدولار).</summary>
+    public long ChangeIqd { get; set; }
     public Guid? CreatedBy { get; set; }
     public DateTimeOffset? CreatedOfflineAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
@@ -110,6 +116,8 @@ public static class TenderMethods
     public const string Cash = "cash";
     public const string Pos = "pos";
     public const string Online = "online";
+    /// <summary>نقد بالدولار (الترحيل 023).</summary>
+    public const string CashUsd = "cash_usd";
 }
 
 public class PaymentTender
@@ -120,6 +128,10 @@ public class PaymentTender
     public long Amount { get; set; }
     public string? PosTerminal { get; set; }
     public string? PosReference { get; set; }
+    /// <summary>IQD | USD. لـ cash_usd: original_amount بالدولار و exchange_rate، و amount المقابل المطبَّق بالدينار.</summary>
+    public string Currency { get; set; } = "IQD";
+    public long? OriginalAmount { get; set; }
+    public int? ExchangeRate { get; set; }
 }
 
 public class PaymentAllocation
@@ -142,7 +154,9 @@ public static class RefundMethods
     public const string Pos = "pos";
     public const string OnlineReversal = "online_reversal";
     public const string PatientCredit = "patient_credit";
-    public static readonly string[] All = [Cash, Pos, OnlineReversal, PatientCredit];
+    /// <summary>استرجاع دفعة بالدولار بنفس العملة (الترحيل 023).</summary>
+    public const string CashUsd = "cash_usd";
+    public static readonly string[] All = [Cash, Pos, OnlineReversal, PatientCredit, CashUsd];
 }
 
 public class Refund
@@ -161,6 +175,8 @@ public class Refund
     public Guid? ReceiptId { get; set; }
     public long DoctorShareAdjustment { get; set; }
     public long ComplexShareAdjustment { get; set; }
+    /// <summary>cash_usd: المبلغ المسترجع بالدولار بسعر الدفع الأصلي.</summary>
+    public long? OriginalAmount { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
 }
 
@@ -231,4 +247,14 @@ public class Expense
     public Guid? VoidedBy { get; set; }
     public DateTimeOffset? VoidedAt { get; set; }
     public string? VoidReason { get; set; }
+}
+
+/// <summary>سعر صرف اليوم لفرع: دينار لكل دولار (الترحيل 023).</summary>
+public class ExchangeRate
+{
+    public Guid BranchId { get; set; }
+    public DateOnly RateDate { get; set; }
+    public int UsdToIqd { get; set; }
+    public Guid? SetBy { get; set; }
+    public DateTimeOffset SetAt { get; set; }
 }

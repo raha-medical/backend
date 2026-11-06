@@ -802,6 +802,7 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         var rx = await Api.PostAsync(pharm, "/api/v1/referrals/scan", new { service = "pharmacy", code = v.Rx });
         Assert.True(rx.Status == 200, rx.Raw);
         var active = await ReferralAsync(pharm, "pharmacy", "activated", patient);
+        await PharmacyTest.BillFreeAsync(pharm, Id(active, "prescription_id"));
         var done = await Api.PostAsync(pharm, $"/api/v1/pharmacy/prescriptions/{Id(active, "prescription_id")}/dispense", new { lines = new[] { new { line_no = 1, dispensed = true } } }, Guid.NewGuid());
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("completed", S(await ReferralAsync(pharm, "pharmacy", "completed", patient), "status"));
@@ -848,6 +849,7 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.DoesNotContain((await Api.GetAsync(home, "/api/v1/referrals?service=pharmacy&status=referred")).Body!["items"]!.AsArray(), x => Id(x, "patient_id") == patient);
         Assert.DoesNotContain((await Api.GetAsync(home, "/api/v1/referrals?service=pharmacy&status=activated")).Body!["items"]!.AsArray(), x => Id(x, "patient_id") == patient);
 
+        await PharmacyTest.BillFreeAsync(other, Id(moved, "prescription_id"));
         var done = await Api.PostAsync(other, $"/api/v1/pharmacy/prescriptions/{Id(moved, "prescription_id")}/dispense", new { lines = new[] { new { line_no = 1, dispensed = true } } }, Guid.NewGuid());
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("completed", S(await ReferralAsync(other, "pharmacy", "completed", patient), "status"));

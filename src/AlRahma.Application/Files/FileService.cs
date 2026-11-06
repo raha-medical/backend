@@ -6,7 +6,11 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AlRahma.Application.Files;
 
-public record UploadUrlRequest(string? FileName, string? ContentType, long? SizeBytes, string? Purpose, Guid? OrderItemId, Guid? DoctorId);
+/// <summary>external_result: ticket_id (دور المراجع). prescription: patient_id (صورة وصفة خارجية للصيدلية).</summary>
+public record UploadUrlRequest(string? FileName, string? ContentType, long? SizeBytes, string? Purpose, Guid? OrderItemId, Guid? DoctorId,
+    Guid? TicketId = null, Guid? PatientId = null);
+public record FileInfoDto(Guid FileId, string Purpose, string FileName, string ContentType, long SizeBytes, Guid? TicketId, Guid? PatientId,
+    string? UploadedByName, DateTimeOffset CreatedAt, string DownloadUrl);
 public record UploadUrlResponse(Guid FileId, string UploadUrl, string Method, IDictionary<string, string> Headers, int ExpiresIn);
 public record FileStatusResponse(Guid FileId, string Status);
 public record DownloadUrlResponse(string Url, int ExpiresIn);
@@ -48,8 +52,9 @@ public class FileService(IAppDbContext db, ICurrentUser current, IObjectStorage 
             .ThrowIfInvalid();
 
         if (req.Purpose is FilePurposes.Lab or FilePurposes.Radiology) return await CreateOrderUploadAsync(req, ct);
+        if (req.Purpose is FilePurposes.ExternalResult or FilePurposes.Prescription) return await CreatePatientUploadAsync(req, ct);
         if (req.Purpose != FilePurposes.DoctorPhoto)
-            throw new AppException(422, "INVALID_FILE_PURPOSE", "نوع الملف غير مدعوم", "lab | radiology | doctor_photo");
+            throw new AppException(422, "INVALID_FILE_PURPOSE", "نوع الملف غير مدعوم", "lab | radiology | doctor_photo | external_result | prescription");
 
         new Validator()
             .Check(req.DoctorId is not null, "doctor_id", "الطبيب مطلوب لصورة الطبيب")
@@ -114,6 +119,82 @@ public class FileService(IAppDbContext db, ICurrentUser current, IObjectStorage 
             new Dictionary<string, string> { ["Content-Type"] = req.ContentType! }, (int)UploadExpiry.TotalSeconds);
     }
 
+    public const long PatientFileMaxBytes = 20L * 1024 * 1024;
+
+    /// <summary>
+    /// صورة نتيجة خارجية (1.2-ج3): يرفعها الاستقبال (queue.manage) على دور المراجع في فرعه، ويراها الطبيب في المعاينة.
+    /// صورة وصفة خارجية (6.3-ب): يرفعها الصيدلي (pharmacy.dispense) لمراجع، وتُرفق بالصرف للأدوية التي تحتاج وصفة.
+    /// JPG أو PNG أو PDF، 20MB كحد أقصى.
+    /// </summary>
+    private async Task<UploadUrlResponse> CreatePatientUploadAsync(UploadUrlRequest req, CancellationToken ct)
+    {
+        var external = req.Purpose == FilePurposes.ExternalResult;
+        if (!current.Has(external ? Permissions.QueueManage : Permissions.PharmacyDispense))
+            throw AppException.Forbidden(external ? "صورة النتيجة الخارجية يرفعها الاستقبال" : "صورة الوصفة يرفعها الصيدلي");
+        new Validator()
+            .Check(!external || req.TicketId is not null, "ticket_id", "الدور مطلوب")
+
+            .Check(req.ContentType is "image/jpeg" or "image/png" or "application/pdf", "content_type", "image/jpeg | image/png | application/pdf")
+            .Check(req.SizeBytes <= PatientFileMaxBytes, "size_bytes", "20MB كحد أقصى")
+            .ThrowIfInvalid();
+        Guid? ticketId = null;
+        Guid? patientId = null;
+        if (external)
+        {
+            var ticket = await db.QueueTickets.AsNoTracking().FirstOrDefaultAsync(t => t.TicketId == req.TicketId && t.BranchId == current.BranchId, ct)
+                         ?? throw new AppException(404, "TICKET_NOT_FOUND", "الدور غير موجود في هذا الفرع");
+            ticketId = ticket.TicketId;
+            patientId = ticket.PatientId;
+        }
+        else if (req.PatientId is not null)
+        {
+            // صورة الوصفة قد تُرفع قبل إنشاء ملف المراجع الخارجي؛ تُربط به عند الصرف
+            patientId = await db.Patients.AsNoTracking().Where(p => p.PatientId == req.PatientId).Select(p => (Guid?)p.PatientId).FirstOrDefaultAsync(ct)
+                        ?? throw new AppException(404, "PATIENT_NOT_FOUND", "المريض غير موجود");
+        }
+        var fileId = UuidV7.New();
+        var folder = external ? "external" : "rx";
+        var owner = patientId is { } owned ? owned.ToString("N") : "unassigned";
+        var key = $"{folder}/{owner}/{fileId:N}.{OrderExtensions[req.ContentType!]}";
+        db.Files.Add(new StoredFile
+        {
+            FileId = fileId, BranchId = current.BranchId, Bucket = storage.Bucket, ObjectKey = key, FileName = req.FileName!.Trim(),
+            ContentType = req.ContentType!, SizeBytes = req.SizeBytes!.Value, Purpose = req.Purpose!, TicketId = ticketId, PatientId = patientId,
+            Status = FileStatuses.Pending, UploadedBy = current.UserId, CreatedAt = clock.UtcNow,
+        });
+        await db.SaveChangesAsync(ct);
+        return new UploadUrlResponse(fileId, storage.PresignUpload(key, req.ContentType!, UploadExpiry), "PUT",
+            new Dictionary<string, string> { ["Content-Type"] = req.ContentType! }, (int)UploadExpiry.TotalSeconds);
+    }
+
+    /// <summary>
+    /// ملفات المراجع المرفوعة (النتائج الخارجية وصور الوصفات) مع روابط تنزيل مؤقتة. للطبيب والاستقبال والصيدلي في الفرع.
+    /// ticket_id: نتائج دور (ونتائج الزيارة الأصلية إن كان الدور عودة). patient_id: كل ملفات المراجع في الفرع.
+    /// </summary>
+    public async Task<List<FileInfoDto>> ListPatientFilesAsync(Guid? ticketId, Guid? patientId, string? purpose, CancellationToken ct)
+    {
+        if (!(current.Has(Permissions.QueueManage) || current.Has(Permissions.ClinicalWrite) || current.Has(Permissions.PharmacyDispense)))
+            throw AppException.Forbidden();
+        new Validator()
+            .Check(ticketId is not null || patientId is not null, "ticket_id", "الدور أو المراجع مطلوب")
+            .Check(purpose is null or FilePurposes.ExternalResult or FilePurposes.Prescription, "purpose", "external_result | prescription")
+            .ThrowIfInvalid();
+        var q = db.Files.AsNoTracking().Where(f => f.BranchId == current.BranchId && f.Status == FileStatuses.Stored
+            && (f.Purpose == FilePurposes.ExternalResult || f.Purpose == FilePurposes.Prescription));
+        if (purpose is not null) q = q.Where(f => f.Purpose == purpose);
+        if (ticketId is { } tid)
+        {
+            var original = await db.QueueTickets.AsNoTracking().Where(t => t.TicketId == tid).Select(t => t.OriginalTicketId).FirstOrDefaultAsync(ct);
+            q = q.Where(f => f.TicketId == tid || (original != null && f.TicketId == original));
+        }
+        if (patientId is { } pid) q = q.Where(f => f.PatientId == pid);
+        var rows = await q.OrderByDescending(f => f.CreatedAt).Take(50).ToListAsync(ct);
+        var users = rows.Where(f => f.UploadedBy != null).Select(f => f.UploadedBy!.Value).Distinct().ToList();
+        var names = await db.Users.AsNoTracking().Where(u => users.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId, u => u.FullName, ct);
+        return rows.Select(f => new FileInfoDto(f.FileId, f.Purpose, f.FileName, f.ContentType, f.SizeBytes, f.TicketId, f.PatientId,
+            f.UploadedBy is { } u ? names.GetValueOrDefault(u) : null, f.CreatedAt, storage.PresignDownload(f.ObjectKey, DownloadExpiry))).ToList();
+    }
+
     /// <summary>تأكيد الرفع: يتحقق السيرفر من وجود الملف في MinIO ومن حجمه.</summary>
     public async Task<FileStatusResponse> CompleteAsync(Guid fileId, CancellationToken ct)
     {
@@ -125,7 +206,12 @@ public class FileService(IAppDbContext db, ICurrentUser current, IObjectStorage 
         var size = await storage.GetSizeAsync(file.ObjectKey, ct)
                    ?? throw new AppException(422, "FILE_NOT_UPLOADED", "لم يصل الملف إلى التخزين",
                        "ارفع الملف على الرابط أولاً ثم أكّد");
-        var limit = file.Purpose == FilePurposes.DoctorPhoto ? DoctorPhotoMaxBytes : 200L * 1024 * 1024;
+        var limit = file.Purpose switch
+        {
+            FilePurposes.DoctorPhoto => DoctorPhotoMaxBytes,
+            FilePurposes.ExternalResult or FilePurposes.Prescription => PatientFileMaxBytes,
+            _ => 200L * 1024 * 1024,
+        };
         if (size <= 0 || size > limit)
         {
             await storage.DeleteAsync(file.ObjectKey, ct);

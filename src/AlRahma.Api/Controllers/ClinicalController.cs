@@ -162,8 +162,47 @@ public class RadiologyController(RadiologyService radiology) : ControllerBase
 [ApiController]
 [Route("api/v1/pharmacy")]
 [Produces("application/json")]
-public class PharmacyController(PharmacyService pharmacy) : ControllerBase
+public class PharmacyController(PharmacyService pharmacy, PharmacyBillingService billing) : ControllerBase
 {
+    /// <summary>تسعير الوصفة: لكل سطر متوفر/غير متوفر، يريده المراجع أم لا، والكمية، والدواء من القائمة أو سعر يدوي. يُنشئ فاتورة الأدوية.</summary>
+    [HttpPost("prescriptions/{prescriptionId:guid}/bill")]
+    [Authorize(Policy = Permissions.PharmacyDispense)]
+    [Idempotent]
+    [ProducesResponseType<PharmacyBillDto>(200)]
+    public Task<PharmacyBillDto> Bill(Guid prescriptionId, BillPrescriptionRequest req, CancellationToken ct) => billing.BillAsync(prescriptionId, req, ct);
+
+    [HttpGet("prescriptions/{prescriptionId:guid}/bill")]
+    [Authorize(Policy = Policies.PharmacyRead)]
+    [ProducesResponseType<PharmacyBillDto>(200)]
+    public Task<PharmacyBillDto> GetBill(Guid prescriptionId, CancellationToken ct) => billing.BillOfPrescriptionAsync(prescriptionId, ct);
+
+    /// <summary>صرف لمراجع خارجي: ملف مختصر، أدوية من القائمة، فاتورة. الدواء الذي يحتاج وصفة يتطلب صورة الوصفة أو ملاحظة.</summary>
+    [HttpPost("external-sales")]
+    [Authorize(Policy = Permissions.PharmacyDispense)]
+    [Idempotent]
+    [ProducesResponseType<PharmacyBillDto>(201)]
+    public async Task<IActionResult> ExternalSale(ExternalSaleRequest req, CancellationToken ct) => StatusCode(201, await billing.ExternalSaleAsync(req, ct));
+
+    /// <summary>تسليم أدوية المراجع الخارجي بعد الدفع.</summary>
+    [HttpPost("external-sales/{invoiceId:guid}/deliver")]
+    [Authorize(Policy = Permissions.PharmacyDispense)]
+    [ProducesResponseType<PharmacyBillDto>(200)]
+    public Task<PharmacyBillDto> Deliver(Guid invoiceId, CancellationToken ct) => billing.DeliverExternalAsync(invoiceId, ct);
+
+    /// <summary>سجل الصرف: كل سطر (المراجع، الدواء، الكمية، السعر، الطبيب أو «مراجع خارجي»، الموظف، الحالة) وملخص الفترة. format=csv للتصدير.</summary>
+    [HttpGet("dispense-log")]
+    [Authorize(Policy = Policies.PharmacyRead)]
+    public async Task<IActionResult> Log([FromQuery(Name = "from")] DateOnly? from, [FromQuery(Name = "to")] DateOnly? to,
+        [FromQuery(Name = "drug")] string? drug, [FromQuery(Name = "doctor_id")] Guid? doctorId, [FromQuery(Name = "user_id")] Guid? userId,
+        [FromQuery(Name = "status")] string? status, [FromQuery(Name = "external")] bool? external, [FromQuery(Name = "format")] string? format,
+        CancellationToken ct)
+    {
+        var log = await billing.LogAsync(new DispenseLogQuery(from, to, drug, doctorId, userId, status, external), ct);
+        return format == "csv"
+            ? File(PharmacyBillingService.ToCsv(log), "text/csv; charset=utf-8", $"pharmacy-{log.From:yyyy-MM-dd}_{log.To:yyyy-MM-dd}.csv")
+            : Ok(log);
+    }
+
     [HttpGet("prescriptions/{code}")]
     [Authorize(Policy = Permissions.PharmacyDispense)]
     [ProducesResponseType<PrescriptionDto>(200)]
@@ -178,9 +217,11 @@ public class PharmacyController(PharmacyService pharmacy) : ControllerBase
     [HttpGet("dispensed")]
     [Authorize(Policy = Policies.PharmacyRead)]
     [ProducesResponseType<PagedResult<PrescriptionDto>>(200)]
-    public Task<PagedResult<PrescriptionDto>> Dispensed([FromQuery(Name = "date")] DateOnly? date, [FromQuery(Name = "page")] int page = 1,
+    public Task<PagedResult<PrescriptionDto>> Dispensed([FromQuery(Name = "date")] DateOnly? date, [FromQuery(Name = "from")] DateOnly? from,
+        [FromQuery(Name = "to")] DateOnly? to, [FromQuery(Name = "doctor_id")] Guid? doctorId, [FromQuery(Name = "user_id")] Guid? userId,
+        [FromQuery(Name = "drug")] string? drug, [FromQuery(Name = "page")] int page = 1,
         [FromQuery(Name = "page_size")] int pageSize = 20, CancellationToken ct = default) =>
-        pharmacy.DispensedAsync(date, page, pageSize, ct);
+        pharmacy.DispensedAsync(new DispensedQuery(date, from, to, doctorId, userId, drug), page, pageSize, ct);
 }
 
 /// <summary>دورة التحويل للخدمات (العقد 23). الصلاحية تُفحص في الخدمة حسب نوع الخدمة، والنطاق الفرع الحالي.</summary>

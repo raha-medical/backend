@@ -72,6 +72,10 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<OnlinePayment> OnlinePayments => Set<OnlinePayment>();
     public DbSet<MockGatewayTransaction> MockGatewayTransactions => Set<MockGatewayTransaction>();
     public DbSet<StaffLiability> StaffLiabilities => Set<StaffLiability>();
+    public DbSet<FaqItem> FaqItems => Set<FaqItem>();
+    public DbSet<SupportRequest> SupportRequests => Set<SupportRequest>();
+    public DbSet<PharmacyDispenseLine> PharmacyDispenseLines => Set<PharmacyDispenseLine>();
+    public DbSet<ExchangeRate> ExchangeRates => Set<ExchangeRate>();
     public DbSet<ReceiptBlock> ReceiptBlocks => Set<ReceiptBlock>();
     public DbSet<SyncOperation> SyncOperations => Set<SyncOperation>();
     public DbSet<AgentEvent> AgentEvents => Set<AgentEvent>();
@@ -437,6 +441,27 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
         {
             e.ToTable("staff_liabilities");
             e.HasKey(x => x.LiabilityId);
+        });
+        // الجلسة 4 (الترحيلات 021 إلى 023)
+        b.Entity<FaqItem>(e =>
+        {
+            e.ToTable("faq_items");
+            e.HasKey(x => x.FaqId);
+        });
+        b.Entity<SupportRequest>(e =>
+        {
+            e.ToTable("support_requests");
+            e.HasKey(x => x.SupportRequestId);
+        });
+        b.Entity<PharmacyDispenseLine>(e =>
+        {
+            e.ToTable("pharmacy_dispense_lines");
+            e.HasKey(x => x.DispenseLineId);
+        });
+        b.Entity<ExchangeRate>(e =>
+        {
+            e.ToTable("exchange_rates");
+            e.HasKey(x => new { x.BranchId, x.RateDate });
         });
         b.Entity<MockGatewayTransaction>(e =>
         {

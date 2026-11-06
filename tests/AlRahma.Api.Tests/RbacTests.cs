@@ -16,13 +16,16 @@ public class RbacTests(TestApp app)
             // الترحيل 012 (عيب D3): قراءة كل فرعه، بلا صلاحية كتابة جديدة
             "lab.view", "radiology.view", "pharmacy.view", "audit.read", "notifications.branch_view", "backups.view",
             // الترحيل 017 (8.6-ق1): دمج الملفات بالصلاحية لا بالدور
-            "patients.merge"],
+            "patients.merge",
+            // الترحيل 021: الدعم
+            "support.manage"],
         ["doctor"] = ["clinical.write", "queue.manage", "deferrals.grant"],
         ["receptionist"] = ["queue.manage", "payments.collect", "patients.write"],
         ["accountant"] = ["shifts.review", "refunds.approve", "reports.finance", "patients.unban", "payments.collect", "audit.read", "expenses.manage"],
         ["lab_tech"] = ["lab.write"],
         ["radiologist"] = ["radiology.write"],
-        ["pharmacist"] = ["pharmacy.dispense"],
+        // الترحيل 022: موظف الصيدلية يحصّل على حسابه اليومي
+        ["pharmacist"] = ["pharmacy.dispense", "payments.collect"],
     };
 
     private static string Code() => "qa_" + Guid.NewGuid().ToString("N")[..10];
@@ -289,13 +292,13 @@ public class RbacTests(TestApp app)
         try
         {
             Assert.Equal(200, (await Api.PatchAsync(admin, "/api/v1/roles/pharmacist",
-                new { name_ar = "صيدلي أول", permissions = new[] { "pharmacy.dispense", "reports.finance" } })).Status);
+                new { name_ar = "صيدلي أول", permissions = new[] { "pharmacy.dispense", "payments.collect", "reports.finance" } })).Status);
             Assert.Equal(200, (await Api.GetAsync(ph, "/api/v1/reports/no-shows")).Status);
             Assert.Equal("صيدلي أول", (await Api.GetAsync(ph, "/api/v1/auth/me")).Body!["role_name_ar"]!.GetValue<string>());
         }
         finally
         {
-            Assert.Equal(200, (await Api.PatchAsync(admin, "/api/v1/roles/pharmacist", new { name_ar = "صيدلي", permissions = new[] { "pharmacy.dispense" } })).Status);
+            Assert.Equal(200, (await Api.PatchAsync(admin, "/api/v1/roles/pharmacist", new { name_ar = "صيدلي", permissions = new[] { "pharmacy.dispense", "payments.collect" } })).Status);
         }
         Assert.Equal(403, (await Api.GetAsync(ph, "/api/v1/reports/no-shows")).Status);
 

@@ -58,9 +58,23 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         var methodMismatch = req.Method switch
         {
             RefundMethods.Cash => !paidWith.Contains(TenderMethods.Cash),
+            RefundMethods.CashUsd => !paidWith.Contains(TenderMethods.CashUsd),
             RefundMethods.Pos => !paidWith.Contains(TenderMethods.Pos),
             _ => false,
         };
+        // 7.2: دفعة بالدولار تُسترجع بنفس العملة وبسعر الدفع الأصلي (لا بسعر يوم الاسترجاع)
+        long? usdAmount = null;
+        if (req.Method == RefundMethods.CashUsd)
+        {
+            var rate = await db.PaymentAllocations.Where(a => a.InvoiceItemId == itemId)
+                .Join(db.PaymentTenders, a => a.PaymentId, t => t.PaymentId, (a, t) => t)
+                .Where(t => t.Method == TenderMethods.CashUsd).Select(t => t.ExchangeRate).FirstOrDefaultAsync(ct)
+                ?? throw new AppException(422, "REFUND_METHOD_NOT_AVAILABLE", "البند لم يُدفع بالدولار", "استرجاع الدولار لبند دُفع بالدولار فقط");
+            if (req.Amount!.Value % rate != 0)
+                throw new AppException(422, "REFUND_NOT_WHOLE_USD", "المبلغ لا يساوي عدداً صحيحاً من الدولارات بسعر الدفع")
+                    { Extensions = new Dictionary<string, object?> { ["exchange_rate"] = rate } };
+            usdAmount = req.Amount.Value / rate;
+        }
         if (item.PerformedAt is not null && !isApprover)
             throw new AppException(409, "ITEM_ALREADY_PERFORMED", "البند نُفذ", "استرجاع بند منفذ يتطلب موافقة المحاسب أو المدير");
 
@@ -71,6 +85,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
             Amount = req.Amount!.Value,
             Method = req.Method!,
             Reason = req.Reason!.Trim(),
+            OriginalAmount = usdAmount,
             Status = RefundStatuses.PendingApproval,
             RequestedBy = current.UserId,
             CreatedAt = clock.UtcNow,
@@ -80,7 +95,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         string? drawerToken = null;
         // قرار المالك (أ): الاسترجاع النقدي اليدوي يحتاج دائماً موافقة محاسب الفرع أو المشرف مهما كان المبلغ، والسبب إلزامي.
         // الحد (refund.cashier_limit) يبقى لغير النقد فقط. الاسترجاع التلقائي بالسياسة (إلغاء الطبيب جدوله) لا يمر من هنا.
-        if (isApprover || (refund.Method != RefundMethods.Cash && refund.Amount <= limit && !methodMismatch))
+        if (isApprover || (refund.Method is not (RefundMethods.Cash or RefundMethods.CashUsd) && refund.Amount <= limit && !methodMismatch))
             drawerToken = await CompleteAsync(refund, item, await ShiftForAsync(refund, null, ct), ct);
         audit.Add("REFUND_REQUESTED", "refund", id, after: new { refund.InvoiceItemId, refund.Amount, refund.Method, refund.Status }, reason: refund.Reason);
         await db.SaveChangesAsync(ct);
@@ -177,7 +192,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
     /// <summary>النقد و POS يخرجان من درج: وردية الموظف المنفذ، أو وردية طالب الاسترجاع إن كانت ما زالت مفتوحة.</summary>
     private async Task<Shift?> ShiftForAsync(Refund refund, Guid? requester, CancellationToken ct)
     {
-        if (refund.Method is not (RefundMethods.Cash or RefundMethods.Pos)) return null;
+        if (refund.Method is not (RefundMethods.Cash or RefundMethods.Pos or RefundMethods.CashUsd)) return null;
         if (await finance.OpenShiftOfAsync(current.UserId, ct) is { } mine) return mine;
         if (requester is { } rid && await finance.OpenShiftOfAsync(rid, ct) is { } theirs) return theirs;
         throw new AppException(409, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح", "استرجاع النقد أو POS يخرج من حساب يومي مفتوح");

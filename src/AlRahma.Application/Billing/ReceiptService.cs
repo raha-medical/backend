@@ -11,12 +11,20 @@ public record PrintTender(string Method, long Amount)
 {
     /// <summary>اسم طريقة الدفع بالعربي للطباعة.</summary>
     public string MethodAr => ArabicFormat.PaymentMethod(Method);
+    /// <summary>الدولار (7.2): المبلغ بعملته، وسعر الصرف، والمقابل بالدينار (amount).</summary>
+    public string Currency { get; init; } = "IQD";
+    public long? OriginalAmount { get; init; }
+    public int? ExchangeRate { get; init; }
+    public string? DisplayAr => Currency == "USD" && OriginalAmount is { } usd && ExchangeRate is { } rate
+        ? string.Create(System.Globalization.CultureInfo.InvariantCulture, $"{usd:N0} $ (المقابل {usd * rate:N0} د.ع بسعر {rate:N0})") : null;
 }
 public record PrintPayloadDto(string ReceiptNumber, string Type, string TypeAr, string BranchName, DateTimeOffset IssuedAt, string CashierName,
     string? PatientName, string? FileNumber, IReadOnlyList<PrintLine> Lines, long DepositUsed, IReadOnlyList<PrintTender> Tenders, long Total,
     string QrCode, string Footer, bool IsCopy, int CopyNumber,
     string? ClinicName = null, string? DoctorName = null, string? TicketNumber = null, string? LogoUrl = null)
 {
+    /// <summary>الفكة المعادة بالدينار عند الدفع بالدولار.</summary>
+    public long ChangeIqd { get; init; }
     /// <summary>حقول العرض بتوقيت بغداد؛ issued_at بتوقيت UTC قد يقع في يوم آخر قرب منتصف الليل.</summary>
     public string IssuedDate => ArabicFormat.IsoDate(IssuedAt);
     public string IssuedDateAr => ArabicFormat.Date(IssuedAt);
@@ -53,6 +61,7 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
 
         var lines = new List<PrintLine>();
         var tenders = new List<PrintTender>();
+        long changeIqd = 0;
         long depositUsed = 0;
         if (r.Type == ReceiptTypes.Refund)
         {
@@ -65,7 +74,11 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
                             from t in tj.DefaultIfEmpty()
                             select new { i.ServiceName, Doctor = d == null ? null : d.FullName, Ticket = t == null ? null : t.TicketNumber }).FirstAsync(ct);
             lines.Add(new PrintLine($"استرجاع: {it.ServiceName}", refund.Amount, it.Doctor, it.Ticket));
-            tenders.Add(new PrintTender(refund.Method, refund.Amount));
+            tenders.Add(new PrintTender(refund.Method, refund.Amount)
+            {
+                Currency = refund.Method == RefundMethods.CashUsd ? "USD" : "IQD", OriginalAmount = refund.OriginalAmount,
+                ExchangeRate = refund.OriginalAmount is > 0 ? (int)(refund.Amount / refund.OriginalAmount.Value) : null,
+            });
         }
         else
         {
@@ -83,7 +96,11 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
                 .ToDictionaryAsync(i => i.InvoiceItemId, ct);
             lines.AddRange(payment.Allocations.Select(a => new PrintLine(items[a.InvoiceItemId].ServiceName, a.Amount, items[a.InvoiceItemId].Doctor, items[a.InvoiceItemId].Ticket)));
             if (r.Type == ReceiptTypes.Deposit) lines.Add(new PrintLine("عربون (رصيد للمريض)", payment.TotalPaid));
-            tenders.AddRange(payment.Tenders.Select(t => new PrintTender(t.Method, t.Amount)));
+            tenders.AddRange(payment.Tenders.Select(t => new PrintTender(t.Method, t.Amount)
+            {
+                Currency = t.Currency, OriginalAmount = t.OriginalAmount, ExchangeRate = t.ExchangeRate,
+            }));
+            changeIqd = payment.ChangeIqd;
         }
         var copyNumber = copy is > 1 ? copy.Value : 1;
         // نقطة التحصيل (عيادة الطبيب) من الوردية، والطبيب ورقم الدور إن كانت كل البنود لطبيب واحد
@@ -100,7 +117,7 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
             patient?.FullName, patient?.FileNumber, lines, depositUsed, tenders, r.Total, finance.QrUrl(r.VerifyCode),
             copyNumber > 1 ? $"نسخة مكررة ({copyNumber}) - {finance.Options.Footer}" : finance.Options.Footer, copyNumber > 1, copyNumber,
             clinic, doctors.Count == 1 ? doctors[0] : null, tickets.Count == 1 ? tickets[0] : null,
-            string.IsNullOrWhiteSpace(finance.Options.LogoUrl) ? null : finance.Options.LogoUrl);
+            string.IsNullOrWhiteSpace(finance.Options.LogoUrl) ? null : finance.Options.LogoUrl) { ChangeIqd = changeIqd };
     }
 
     /// <summary>إيصالات وردية (الافتراضي ورديتي المفتوحة)، الأحدث أولاً، لإعادة طباعة نسخة.</summary>

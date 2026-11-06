@@ -37,6 +37,9 @@ public record PublicBranchDto(Guid BranchId, string Code, string Name, string? C
     IReadOnlyList<WorkingDayDto>? WorkingHoursSchedule = null, IReadOnlyList<WorkingShiftDto>? TodayHours = null, bool? OpenNow = null)
 {
     public BranchDirectionsDto? Directions => BranchDirectionsDto.For(Latitude, Longitude);
+    /// <summary>رقم واتساب الفرع ورابطه (الترحيل 021).</summary>
+    public string? Whatsapp { get; init; }
+    public string? WhatsappUrl => Support.SupportService.WhatsappUrl(Whatsapp);
 }
 public record PublicClinicDto(Guid ClinicId, string Name, short? Floor, bool IsOpenToday, string? ClosureLabel, DateOnly? ClosedUntil);
 public record PublicDepartmentDto(string Department, string DepartmentAr, IReadOnlyList<PublicClinicDto> Clinics);
@@ -216,7 +219,7 @@ public class BranchPortalService(IAppDbContext db, IClock clock, BranchService b
                 BranchService.Departments.Where(d => departments.Any(x => x.BranchId == b.BranchId && x.Department == d)).ToList(),
                 doctorCounts.GetValueOrDefault(b.BranchId),
                 b.WorkingHoursSchedule, b.TodayHours,
-                b.WorkingHoursSchedule is null ? null : b.LiveStatus == "open"))
+                b.WorkingHoursSchedule is null ? null : b.LiveStatus == "open") { Whatsapp = b.Whatsapp })
             .ToList();
     }
 }

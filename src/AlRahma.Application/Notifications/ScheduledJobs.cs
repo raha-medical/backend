@@ -64,10 +64,13 @@ public class ScheduledJobs(IAppDbContext db, IClock clock, NotificationService n
             if (QueueEngine.SessionStartUtc(s) > now) continue;
             var autoClose = await settings.GetLongAsync(SettingsReader.AutoCloseAfterMinutes, s.BranchId, 120, ct);
             var ended = QueueEngine.SessionEndUtc(s).AddMinutes(autoClose) <= now;
+            // 5.2-ب للنقد: دفع في الاستقبال وغادر قبل الدخول → مبلغه رصيد في محفظته بنهاية اليوم (قبل تعليم الغياب)
+            var left = ended ? await CreditLeftBeforeEntryAsync(s, now, ct) : 0;
+            changed += left;
             var tickets = await db.QueueTickets.Where(t => t.SessionId == s.SessionId && t.BookingId != null
                     && (t.Status == TicketStatuses.Waiting || (ended && t.Status == TicketStatuses.Skipped)))
                 .ToListAsync(ct);
-            var touched = false;
+            var touched = left > 0;
             if (ended && s.RegistrationClosedAt is null) { s.RegistrationClosedAt = now; touched = true; }
             if (ended)
             {
@@ -139,6 +142,75 @@ public class ScheduledJobs(IAppDbContext db, IClock clock, NotificationService n
             foreach (var p in banned) await queue.PatientBannedAsync(p, s.BranchId, ct);
         }
         return changed;
+    }
+
+    /// <summary>
+    /// مراجع أكّد حضوره ودفع الكشفية (نقداً أو غيره) ثم غادر قبل الدخول، وانتهت الوجبة: نفس سياسة الغائب المدفوع (5.2-ب).
+    /// البند يُسترجع بطريقة «رصيد المريض» (refunds.method = patient_credit) بلا حساب يومي: النقد يبقى في درج من قبضه
+    /// (الحساب اليومي والمطابقة لا يتغيران)، والإيراد وحصة الطبيب يُخفَّضان، والمبلغ رصيد للمريض (left_before_entry). لا حظر.
+    /// </summary>
+    public async Task<int> CreditLeftBeforeEntryAsync(DoctorSession s, DateTimeOffset now, CancellationToken ct)
+    {
+        var waiting = new[] { TicketStatuses.Arrived, TicketStatuses.Called, TicketStatuses.Skipped };
+        var tickets = await db.QueueTickets.Where(t => t.SessionId == s.SessionId && waiting.Contains(t.Status) && t.ArrivedAt != null && t.StartedAt == null)
+            .ToListAsync(ct);
+        var count = 0;
+        foreach (var t in tickets)
+        {
+            var item = await db.InvoiceItems.FirstOrDefaultAsync(i => i.TicketId == t.TicketId && i.Status == InvoiceItemStatuses.Paid
+                && i.PerformedAt == null && (i.ItemType == VisitKinds.NewVisit || i.ItemType == VisitKinds.FollowUp) && i.NetPrice > 0, ct);
+            t.Status = TicketStatuses.NoShow;
+            t.QueuePosition = null;
+            if (t.BookingId is { } bid && await db.Bookings.FirstOrDefaultAsync(b => b.BookingId == bid, ct) is { } booking
+                && booking.Status == BookingStatuses.CheckedIn)
+            {
+                booking.Status = BookingStatuses.NoShow;
+                booking.CountedAsNoShow = false;
+            }
+            count++;
+            if (item is null) continue; // لم يدفع: لا مبلغ (والغياب لا يُحتسب على من حضر)
+            var payment = await db.PaymentAllocations.Where(a => a.InvoiceItemId == item.InvoiceItemId)
+                .Join(db.Payments, a => a.PaymentId, p => p.PaymentId, (a, p) => p).OrderByDescending(p => p.CreatedAt).FirstOrDefaultAsync(ct);
+            var by = payment?.CreatedBy ?? t.CheckedInBy ?? t.CreatedBy;
+            if (by is null) continue;
+            var amount = item.NetPrice - item.RefundedAmount;
+            if (amount <= 0) continue;
+            var doctorAdj = item.NetPrice == 0 ? 0 : -(long)Math.Round((decimal)amount * item.DoctorShare / item.NetPrice, MidpointRounding.AwayFromZero);
+            var refund = new Refund
+            {
+                RefundId = UuidV7.New(), InvoiceItemId = item.InvoiceItemId, Amount = amount, Method = RefundMethods.PatientCredit,
+                Reason = "غادر قبل الدخول: المبلغ رصيد في محفظته تلقائياً بنهاية اليوم", Status = RefundStatuses.Completed,
+                RequestedBy = by.Value, DecidedAt = now, DoctorShareAdjustment = doctorAdj, ComplexShareAdjustment = -amount - doctorAdj, CreatedAt = now,
+            };
+            db.Refunds.Add(refund);
+            item.RefundedAmount += amount;
+            item.Status = InvoiceItemStatuses.Refunded;
+            var invoice = await db.Invoices.Include(i => i.Items).FirstAsync(i => i.InvoiceId == item.InvoiceId, ct);
+            Billing.FinanceCore.RefreshInvoice(invoice);
+            if (payment is not null)
+            {
+                var allocated = await db.PaymentAllocations.Where(a => a.PaymentId == payment.PaymentId).Select(a => a.InvoiceItemId).ToListAsync(ct);
+                var allRefunded = await db.InvoiceItems.Where(i => allocated.Contains(i.InvoiceItemId) && i.InvoiceItemId != item.InvoiceItemId)
+                    .AllAsync(i => i.Status == InvoiceItemStatuses.Refunded, ct);
+                var receipt = await db.Receipts.FirstAsync(r => r.ReceiptId == payment.ReceiptId, ct);
+                receipt.Status = allRefunded ? "refunded" : "partially_refunded";
+            }
+            db.PatientCredits.Add(new PatientCreditEntry
+            {
+                EntryId = UuidV7.New(), PatientId = t.PatientId, BranchId = s.BranchId, Amount = amount, Kind = "left_before_entry",
+                RefundId = refund.RefundId, BookingId = t.BookingId, CreatedAt = now,
+            });
+            db.AuditLogs.Add(new AuditLog
+            {
+                BranchId = s.BranchId, Action = "LEFT_BEFORE_ENTRY_CREDITED", EntityType = "queue_ticket", EntityId = t.TicketId,
+                After = System.Text.Json.JsonSerializer.Serialize(new { amount, refund_id = refund.RefundId, invoice_item_id = item.InvoiceItemId }),
+                OccurredAt = now,
+            });
+            await db.SaveChangesAsync(ct);
+            await queue.CreditAddedAsync(t.PatientId, s.BranchId, amount, "لمغادرتك قبل الدخول إلى الطبيب", t.BookingId, ct);
+        }
+        if (count > 0) await db.SaveChangesAsync(ct);
+        return count;
     }
 
     /// <summary>

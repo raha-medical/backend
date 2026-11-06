@@ -122,6 +122,9 @@ public class Booking
     /// <summary>بند «رسوم إلغاء متأخر» إن وُجد.</summary>
     public Guid? CancelFeeItemId { get; set; }
     public bool CancelFeeWaived { get; set; }
+    /// <summary>بعد إلغاء الطبيب جدوله (5.1-ب): credit | rebooked | refunded، و null = لم يختر المراجع بعد (الرصيد قائم).</summary>
+    public string? CancelResolution { get; set; }
+    public Guid? RebookedBookingId { get; set; }
 
     public Patient? Patient { get; set; }
     public DoctorSession? Session { get; set; }

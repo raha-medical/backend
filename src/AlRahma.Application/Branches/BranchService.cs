@@ -18,7 +18,11 @@ public record BranchDto(Guid BranchId, string Code, string Name, string? City, s
     IReadOnlyList<WorkingDayDto>? WorkingHoursSchedule = null, string? WorkingHoursSummary = null, IReadOnlyList<WorkingShiftDto>? TodayHours = null,
     string LiveStatus = "open", string LiveStatusAr = "مفتوح",
     IReadOnlyList<BranchManagerDto>? Managers = null, BranchDepartmentCountsDto? DepartmentCounts = null, BranchActivityDto? Activity = null,
-    bool IsAssigned = true);
+    bool IsAssigned = true)
+{
+    /// <summary>رقم واتساب الفرع (الترحيل 021).</summary>
+    public string? Whatsapp { get; init; }
+}
 
 /// <summary>مدير الفرع: موظف فعال بدور branch_manager مسند للفرع.</summary>
 public record BranchManagerDto(Guid UserId, string FullName, string? PhoneNumber);
@@ -34,10 +38,11 @@ public record ClinicDto(Guid ClinicId, Guid BranchId, string Name, string Depart
 }
 
 public record CreateBranchRequest(string? Code, string? Name, string? City, string? Address, string? Phone,
-    decimal? Latitude, decimal? Longitude, string? WorkingHours, List<WorkingDayInput>? WorkingHoursSchedule = null);
+    decimal? Latitude, decimal? Longitude, string? WorkingHours, List<WorkingDayInput>? WorkingHoursSchedule = null, string? Whatsapp = null);
 /// <summary>working_hours_schedule: null = بلا تغيير، [] = إلغاء الجدول المهيكل، وإلا الأسبوع كاملاً (الأيام غير المذكورة مغلقة).</summary>
 public record UpdateBranchRequest(string? Name, string? City, string? Address, string? Phone, bool? IsActive,
-    decimal? Latitude, decimal? Longitude, string? WorkingHours, bool? CancelBookings, List<WorkingDayInput>? WorkingHoursSchedule = null);
+    decimal? Latitude, decimal? Longitude, string? WorkingHours, bool? CancelBookings, List<WorkingDayInput>? WorkingHoursSchedule = null,
+    string? Whatsapp = null);
 public record CreateClinicRequest(string? Name, string? Department, short? Floor);
 /// <summary>free_return_days: null = بلا تغيير، -1 = إعداد الفرع، 0..90 = قيمة العيادة.</summary>
 public record UpdateClinicRequest(string? Name, string? Department, short? Floor, bool? IsActive, short? FreeReturnDays = null);
@@ -178,6 +183,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             .Check(req.City is null || req.City.Length <= 100, "city", "100 حرف كحد أقصى")
             .Check(req.Address is null || req.Address.Length <= 255, "address", "255 حرفاً كحد أقصى")
             .Check(req.Phone is null || req.Phone.Length <= 30, "phone", "30 حرفاً كحد أقصى")
+            .Check(req.Whatsapp is null || req.Whatsapp.Length <= 30, "whatsapp", "30 حرفاً كحد أقصى")
             .Check(ValidLocation(req.Latitude, req.Longitude), "latitude", LocationError)
             .Check(req.WorkingHours is null || req.WorkingHours.Length <= 255, "working_hours", "255 حرفاً كحد أقصى")
             .ThrowIfInvalid();
@@ -192,6 +198,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             City = req.City?.Trim(),
             Address = req.Address?.Trim(),
             Phone = req.Phone?.Trim(),
+            Whatsapp = string.IsNullOrWhiteSpace(req.Whatsapp) ? null : req.Whatsapp.Trim(),
             Latitude = req.Latitude,
             Longitude = req.Longitude,
             WorkingHours = string.IsNullOrWhiteSpace(req.WorkingHours) ? null : req.WorkingHours.Trim(),
@@ -222,6 +229,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
             .Check(req.City is null || req.City.Length <= 100, "city", "100 حرف كحد أقصى")
             .Check(req.Address is null || req.Address.Length <= 255, "address", "255 حرفاً كحد أقصى")
             .Check(req.Phone is null || req.Phone.Length <= 30, "phone", "30 حرفاً كحد أقصى")
+            .Check(req.Whatsapp is null || req.Whatsapp.Length <= 30, "whatsapp", "30 حرفاً كحد أقصى")
             .Check(req.Latitude is null && req.Longitude is null || ValidLocation(req.Latitude, req.Longitude), "latitude", LocationError)
             .Check(req.WorkingHours is null || req.WorkingHours.Length <= 255, "working_hours", "255 حرفاً كحد أقصى")
             .ThrowIfInvalid();
@@ -245,6 +253,7 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
         if (req.City is not null) branch.City = req.City.Trim();
         if (req.Address is not null) branch.Address = req.Address.Trim();
         if (req.Phone is not null) branch.Phone = req.Phone.Trim();
+        if (req.Whatsapp is not null) branch.Whatsapp = req.Whatsapp.Trim().Length == 0 ? null : req.Whatsapp.Trim();
         if (req.Latitude is not null) { branch.Latitude = req.Latitude; branch.Longitude = req.Longitude; }
         if (req.WorkingHours is not null) branch.WorkingHours = req.WorkingHours.Trim().Length == 0 ? null : req.WorkingHours.Trim();
         if (req.IsActive is { } active) branch.IsActive = active;
@@ -408,6 +417,6 @@ public partial class BranchService(IAppDbContext db, ICurrentUser current, IAudi
     }
 
     private static BranchDto ToDto(Branch b) =>
-        new(b.BranchId, b.Code, b.Name, b.City, b.Address, b.Phone, b.Latitude, b.Longitude, b.WorkingHours, b.IsActive);
+        new(b.BranchId, b.Code, b.Name, b.City, b.Address, b.Phone, b.Latitude, b.Longitude, b.WorkingHours, b.IsActive) { Whatsapp = b.Whatsapp };
     private static ClinicDto ToDto(Clinic c) => new(c.ClinicId, c.BranchId, c.Name, c.Department, c.Floor, c.IsActive) { FreeReturnDays = c.FreeReturnDays };
 }

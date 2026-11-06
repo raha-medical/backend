@@ -28,7 +28,7 @@ public record InvoiceListQuery(Guid? PatientId, string? Status, DateOnly? From, 
 /// (مراجع مباشر للمختبر أو الأشعة أو إجراء). السعر ونسبة الطبيب لقطة من السيرفر، ولا تُرسل من الواجهة.
 /// </summary>
 public class InvoiceService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, NumberSequences numbers,
-    Clinical.MedicalOrderSync orders)
+    Clinical.MedicalOrderSync orders, CurrencyService currency)
 {
     public async Task<InvoiceDto> CreateAsync(CreateInvoiceRequest req, CancellationToken ct)
     {
@@ -92,10 +92,12 @@ public class InvoiceService(IAppDbContext db, ICurrentUser current, IAuditLogger
             var rate = s.IsCommissionable && l.DoctorId is { } did
                 ? rates.Where(r => r.DoctorId == did).OrderByDescending(r => r.EffectiveFrom).Select(r => r.NewVisitRate).FirstOrDefault()
                 : 0m;
+            var price = await currency.PriceAsync(s, current.BranchId, ct); // 7.2: خدمة USD بسعر اليوم
             invoice.Items.Add(new InvoiceItem
             {
                 InvoiceItemId = UuidV7.New(), InvoiceId = id, ServiceId = s.ServiceId, DoctorId = l.DoctorId, ItemType = s.Type,
-                ServiceName = s.Name, Quantity = qty, UnitPrice = s.Price, CommissionRate = rate, CreatedAt = now,
+                ServiceName = s.Name, Quantity = qty, UnitPrice = price.UnitPriceIqd, CommissionRate = rate, CreatedAt = now,
+                Currency = price.Currency, OriginalUnitPrice = price.OriginalUnitPrice, ExchangeRate = price.Rate,
             });
         }
         var gross = invoice.Items.Sum(i => i.UnitPrice * i.Quantity);

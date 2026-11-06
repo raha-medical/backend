@@ -46,6 +46,12 @@ public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAudi
                 new(SettingsReader.CancelPaidToValues.Credit, "يتحول رصيداً للمريض يُستخدم في زيارته القادمة"),
                 new(SettingsReader.CancelPaidToValues.Refund, "يُرجع إلى وسيلة الدفع الإلكتروني"),
             ]),
+        // 3.1-د (الجلسة 4): كان يُضبط من الجدول فقط (الترحيل 020)
+        new(SettingsReader.CollectionMode, "نمط التحصيل في الفرع: مركزي أو موزّع على الأقسام", "", 1, 1, 2,
+            [
+                new("central", "مركزي: نقطة تحصيل عامة تحصّل كل البنود (الافتراضي)"),
+                new("distributed", "موزّع: كل نقطة تحصيل تحصّل بنود قسمها فقط"),
+            ]),
         new(SettingsReader.SelfCheckInEnabled, "تثبيت الحضور الذاتي بمسح رمز QR شاشة الانتظار (1 مفعل، 0 موقوف)", "", 1, 0, 1),
         new(SettingsReader.CheckInQrScope, "نطاق رمز QR الشاشة: حجوزات عيادة الشاشة فقط، أو أي عيادة في الفرع", "", 1, 1, 2,
             [

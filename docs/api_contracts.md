@@ -1,6 +1,6 @@
 # عقود الـ API - v6
 
-**الإصدار:** v6 · **آخر commit:** `6915288` (backend، الفرع staging) · **التاريخ:** 2026-11-06
+**الإصدار:** v6 · **آخر commit:** `3220d23` (backend، الفرع staging) · **التاريخ:** 2026-11-06
 هذا ملف العقود الوحيد في المستودعات الثلاثة. القسم الأول يلخّص ما تغيّر منذ الوسم `v1.0-stable` (من `git diff v1.0-stable..staging` على الـ Controllers)، وبعده نص v5 الكامل.
 
 ## تغييرات v6 منذ v1.0-stable
@@ -59,7 +59,7 @@
 
 # 🔌 عقود الـ APIs - نظام مجمع الرحمة الطبي
 
-**Al-Rahma Medical Complex - Enterprise API Contracts (v5.0)**
+**Al-Rahma Medical Complex - Enterprise API Contracts (v6.0، متن v5 مع إضافات v6 في أماكنها)**
 **تاريخ الإصدار:** 2026-11-02 (النسخة النهائية: كل الأقسام مبنية ومختبرة، مع إضافات الجزء الثالث)
 **آخر تحديث:** 2026-11-05 (المرحلة 3 من المواصفات: تثبيت الحضور الذاتي بـ QR الشاشة، جدول مرضى اليوم للاستقبال، سياسة الإلغاء وتغيير الموعد لكل فرع، أحداث مباشرة جديدة - الأقسام 5.x و7.y، إضافات بلا كسر، والترحيل 011)
 **تحديث لاحق:** 2026-11-05 (عيوب الفحص: مدير الفرع 2.2 القسم 2.2.1، عرض الإيصال 9، أيام إغلاق الفرع 5، والمرحلة 4 لتطبيق المراجعين: القسم 22، والترحيلان 012 و 013)
@@ -642,6 +642,13 @@
   * بعد الإيقاف: الفرع يختفي من تطبيق المريض، ولا يستطيع موظفوه الدخول عليه.
   * للإغلاق المؤقت (صيانة، عطلة...) استخدم إغلاق الفرع أدناه بدل الإيقاف.
 * **Response:** كائن الفرع مع حالته وكل الحقول الجديدة (`POST` يعيد `201` بنفس الشكل). المدير العام يدخل أي فرع تلقائياً، وباقي الموظفين يُسندون للفرع عبر `branch_ids` في المستخدمين. التعديل يُسجل `BRANCH_UPDATED` في التدقيق مع الجدول قبل وبعد.
+
+### قواعد حفظ الفرع (v6، الترحيل 024)
+* `POST /branches`: **`latitude` و`longitude` إلزاميان** (الموقع من الخريطة). بدونهما: `400` مع `errors.latitude = ["حدد موقع الفرع على الخريطة"]`.
+* الاسم لا يتكرر: `name` و`name_en` يُقارنان بكل الفروع (بما فيها الموقوفة) بلا فرق في الأحرف الكبيرة والصغيرة والمسافات الطرفية. التكرار: `400` مع `errors.name` أو `errors.name_en` = `"يوجد فرع آخر بهذا الاسم"`.
+* `name_en` (اختياري، 100 حرف): الاسم بالإنجليزية، ويعود في `GET /branches` و`GET /branches/{branch_id}`.
+* `PATCH /branches/{branch_id}`: تغيير `latitude`/`longitude` **للمدير العام فقط**؛ غيره (حتى مع `branches.edit`) يحصل على `403` إذا اختلف الموقع المرسل عن المحفوظ. إرسال الموقع نفسه دون تغيير مسموح.
+* الإيقاف (`is_active: false`) وإعادة التفعيل للمدير العام فقط (`branches.delete`). **لا توجد نقطة حذف للفروع**: الفرع يُوقف وتبقى بياناته المالية والطبية.
 
 ### `GET /branches/{branch_id}/overview` (ماذا يوجد داخل الفرع)
 * **الصلاحية:** المدير العام لأي فرع، ومن يملك `branches.view` أو `services.manage` (مدير الفرع) لفرعه المسند إليه. غيرهم: `403`. كائن `branch` فيه الحقول الجديدة (الجدول، المدراء، الحالة الحية).
@@ -1455,6 +1462,20 @@
 
 ---
 
+### 5.1-ب خيارات المراجع بعد إلغاء الطبيب جدوله (تطبيق المراجع)
+حين يلغي الطبيب وجبته (أو يُغلق الفرع أو العيادة) يتحول المدفوع رصيداً تلقائياً، ثم يختار المراجع ما يريد.
+
+`GET /me/bookings/{booking_id}/cancellation-options` (المراجع صاحب الحجز)
+```json
+{ "booking_id": "...", "doctor_cancelled": true, "amount": 25000, "resolution": null, "resolution_ar": null, "rebooked_booking_id": null,
+  "doctor_name": "د. علي", "options": [
+    { "code": "rebook", "label_ar": "أقرب موعد", "available": true, "note": null, "session_id": "..." },
+    { "code": "credit", "label_ar": "إبقاء المبلغ رصيداً", "available": true, "note": null },
+    { "code": "refund", "label_ar": "استرجاع عبر البوابة", "available": false, "note": "الدفع لم يكن إلكترونياً" } ] }
+```
+`POST /me/bookings/{booking_id}/cancellation-choice`: `{ "choice": "rebook" | "credit" | "refund", "session_id": "..." }` (`session_id` لـ rebook فقط)
+الرد: `{ "booking_id", "resolution", "resolution_ar", "amount", "credit_balance", "new_booking": BookingDto | null }`. الاختيار مرة واحدة؛ بعده `409`.
+
 ## 6. الدفع الإلكتروني (Online Payments)
 
 ### المبدأ
@@ -1518,6 +1539,19 @@
 * إلغاء حجز مدفوع إلكترونياً يحول المبلغ إلى رصيد للمريض (القسم 5) ما لم يطلب المحاسب الاسترجاع.
 
 ---
+
+### البوابة التجريبية (v6): خطوات الصفحة
+كل الخطوات للمراجع صاحب الدفعة (`/mock-gateway/{reference}`)، ولا تغيّر إلا حالة المعاملة لدى «البوابة»؛ الحجز لا يُدفع إلا بعد `POST /online-payments/{id}/verify`.
+| النقطة | الطلب | ملاحظة |
+| --- | --- | --- |
+| `GET /mock-gateway/{reference}` | - | حالة الصفحة `MockGatewayPageDto` |
+| `POST /mock-gateway/{reference}/credentials` | زين كاش: `{ "wallet_number", "pin" }`، كي كارد: `{ "card_number", "expiry": "MM/YY", "cvv" }` | ينقل إلى خطوة OTP |
+| `POST /mock-gateway/{reference}/otp` | `{ "otp": "123456" }` | يكمل الدفع لدى البوابة |
+| `POST /mock-gateway/{reference}/otp/resend` | - | إعادة الرمز (عدد محدود) |
+| `POST /mock-gateway/{reference}/cancel` | - | إلغاء المعاملة |
+
+`MockGatewayPageDto`: `reference, provider, merchant_name, amount, currency, status, step, account_masked, failure_code, secret_attempts_left, otp_attempts_left, otp_length, otp_expires_at, otp_resend_at, otp_resends_left, expires_at, online_payment_id`.
+**أُزيلت** النقطتان القديمتان `GET/POST /sandbox/pay/{online_payment_id}`.
 
 ## 7. الطابور الذكي (Queue)
 
@@ -1848,6 +1882,11 @@
 
 ---
 
+### `POST /queue/tickets/{ticket_id}/returned` («عاد بالنتائج»)
+* **الصلاحية:** `queue.manage`. الطلب اختياري: `{ "external": true }` حين يعود بنتائج من خارج المجمع.
+* دور «بانتظار قسم» يعود واصلاً بأولوية `returning`، بلا فاتورة ولا رقم جديد (العودة المجانية حسب `free_return_days` للعيادة أو الفرع).
+* الرد: `CheckInResponse` (نفس رد `POST /queue/check-in`).
+
 ## 8. الفوترة والفاتورة الموحدة (Invoices)
 
 ### 8.0 نقاط التحصيل (القرار المعتمد: "ادفع حيث تُخدم" مع سلة موحدة)
@@ -2120,6 +2159,18 @@
 
 ---
 
+### `POST /receipts/{receipt_id}/printed`
+تسجيل أن الوصل طُبع فعلاً بعد نجاح الطابعة. **الصلاحية:** قراءة الفوترة. الرد: `204`.
+
+### 9.x الدولار (الترحيل 023)
+* `GET /exchange-rates`: سعر صرف اليوم للفرع الحالي وسجل آخر 60 يوماً:
+  `{ "date": "2026-11-06", "today": { "branch_id", "date", "usd_to_iqd": 1500, "set_by_name", "set_at" } | null, "history": [ ... ] }`.
+  `today = null` يعني أن التحصيل بالدولار مرفوض حتى يُدخل السعر.
+* `PUT /exchange-rates`: `{ "usd_to_iqd": 1500, "date": "2026-11-06" }` (`date` اختياري: اليوم أو بعده). **الصلاحية:** `shifts.review` أو `settings.edit`. الرد: `ExchangeRateDto`.
+* `POST /payments`: طريقة جديدة `cash_usd` في `tenders` بمبلغ بالدولار (`amount` = دولار). السيرفر يحوّله بسعر اليوم، والفكة تُعاد بالدينار (`change_iqd`). في الرد والإيصال: `currency = "USD"` و`original_amount` (دولار) و`exchange_rate`، و`amount` المقابل بالدينار.
+* الخدمة قد تكون بالدولار (`services.currency = "USD"`): سعر البند يُحسب بالدينار بسعر اليوم عند إنشائه، ويُحفظ `original_unit_price` و`exchange_rate`.
+* الاسترجاع النقدي لدفعة دولار بطريقة `cash_usd` وبسعر الدفع الأصلي، والحساب اليومي يفصل نقد الدولار (`expected_usd`, `declared_usd`, `variance_usd`).
+
 ## 10. الورديات والإغلاق الأعمى (Shifts & Blind Closing)
 
 ### `POST /shifts/open`
@@ -2185,6 +2236,13 @@
 * **Response (200):** `{ "items": [ { "shift_id", "user_id", "cashier_name", "status", "opened_at", "closed_at", "audit_status", "variance_total", "clinic_id", "clinic_name", "department" } ], "page", "page_size", "total" }`
 
 ---
+
+### `GET /shifts/awaiting-acknowledgement`
+حساباتي اليومية المغلقة تلقائياً بانتظار إقراري بالمبلغ المعدود. الرد: قائمة `ShiftDto`.
+
+### `GET /shifts/liabilities`
+ذمة الموظفين (العجز والزيادة) في الفرع. **الصلاحية:** `shifts.review`. الاستعلام: `user_id`, `status`, `page`, `page_size`.
+العنصر: `{ "liability_id", "shift_id", "user_id", "cashier_name", "amount", "kind", "status", "note", "created_at", "reviewed_at" }`.
 
 ## 11. العيادة والسجل الطبي (Clinical EMR)
 
@@ -2583,6 +2641,27 @@
 
 ---
 
+### 15.x فوترة الصيدلية وسجل الصرف (الترحيل 022)
+الأدوية في كتالوج الخدمات بنوع `pharmacy` (بلا مخزون)، و`requires_prescription` للدواء الذي لا يُصرف للمراجع الخارجي إلا بصورة وصفة أو ملاحظة.
+
+`POST /pharmacy/prescriptions/{prescription_id}/bill` (**الصلاحية:** `pharmacy.dispense`، Idempotency-Key)
+```json
+{ "lines": [ { "line_no": 1, "available": true, "wanted": true, "quantity": 2, "service_id": "...", "unit_price": null, "reason": null } ] }
+```
+لكل سطر: متوفر أم لا، يريده المراجع أم لا، الكمية، والدواء من الكتالوج (`service_id`) أو سعر يدوي (`unit_price`). يُنشئ فاتورة الأدوية.
+الرد `PharmacyBillDto`: `{ "invoice_id", "invoice_number", "patient_id", "patient_name", "file_number", "total_due", "all_paid", "lines": [ { "dispense_line_id", "line_no", "drug_name", "quantity", "unit_price", "amount", "status", "status_ar", "invoice_item_id", "payment_status" } ] }`.
+
+`GET /pharmacy/prescriptions/{prescription_id}/bill`: نفس الرد (قراءة الصيدلية).
+
+`POST /pharmacy/external-sales` (مراجع خارجي، `201`):
+`{ "patient_id": null, "new_patient": { "full_name", "phone_number" }, "items": [ { "service_id", "quantity" } ], "referring_doctor_name": null, "prescription_file_id": null, "note": null }`
+(`patient_id` لمراجع له ملف، أو `new_patient` لملف مختصر جديد). الرد: `PharmacyBillDto`.
+
+`POST /pharmacy/external-sales/{invoice_id}/deliver`: تسليم الأدوية بعد الدفع. الرد: `PharmacyBillDto`.
+
+`GET /pharmacy/dispense-log`: سجل الصرف. الاستعلام: `from`, `to`, `drug`, `doctor_id`, `user_id`, `status`, `external`, و`format=csv` للتصدير.
+الرد: `{ "from", "to", "items": [ { "dispense_line_id", "at", "patient_id", "patient_name", "file_number", "drug_name", "quantity", "unit_price", "amount", "doctor_name", "is_external", "user_name", "status", "status_ar", "prescription_id", "prescription_code", "prescription_status", "prescription_status_ar", "reason" } ], "summary": { "prescriptions_count", "external_sales_count", "complete_count", "partial_count", "not_available_count", "total_amount", "per_drug": [ ... ] } }`.
+
 ## 16. وكيل العتاد المحلي (Local Hardware Agent)
 
 ### المبدأ
@@ -2969,6 +3048,32 @@
 
 ---
 
+### `GET /reports/stats` (لوحة الإحصائيات، v6)
+* **الصلاحية:** `reports.finance`. المدير العام يرى كل الفروع، وغيره فروعه المسندة فقط (فرع آخر: `403`).
+* **الاستعلام:** `from`, `to` (افتراضي آخر 30 يوماً حتى اليوم، 366 يوماً كحد أقصى وإلا `400`)، `branch_id` (اختياري).
+* التعريفات: الإيراد = مخصصات الدفعات على البنود ناقص الاسترجاع المكتمل (مثل `daily-revenue`)، والزيارة = تذكرة حضر صاحبها.
+```json
+{
+  "from": "2026-10-08", "to": "2026-11-06", "branch_id": null,
+  "totals": { "revenue": 501000, "refunds": 0, "visits": 39, "patients": 37, "new_patients": 50, "bookings": 16, "cancelled": 4,
+              "no_shows": 1, "attendance_rate": 43.8, "cancellation_rate": 20.0, "avg_per_day": 16700 },
+  "previous_totals": { "...": "نفس الحقول للفترة السابقة بنفس الطول" },
+  "days": [ { "date": "2026-11-06", "revenue": 160000, "refunds": 0, "visits": 25, "bookings": 6, "cancelled": 1, "no_shows": 0,
+              "new_patients": 12, "collected_iqd": 145000, "collected_usd": 10 } ],
+  "departments": [ { "key": "clinic", "value": 205000 }, { "key": "lab", "value": 150000 }, { "key": "radiology", "value": 120000 }, { "key": "pharmacy", "value": 26000 } ],
+  "methods": [ { "key": "cash", "value": 305000 }, { "key": "pos", "value": 141000 }, { "key": "online", "value": 62000 }, { "key": "cash_usd", "value": 15000 } ],
+  "branches": [ { "branch_id", "code", "name", "revenue", "visits", "patients", "bookings", "cancelled", "no_shows" } ],
+  "top_doctors": [ { "doctor_id", "name", "branch_name", "visits" } ],
+  "weekdays": [ { "key": "saturday", "value": 10 } ],
+  "currency": { "iqd": 508000, "usd": 10, "usd_as_iqd": 15000 },
+  "previous_currency": { "iqd": 0, "usd": 0, "usd_as_iqd": 0 }
+}
+```
+* **الدينار والدولار منفصلان:** `currency.iqd` المقبوض بالدينار، و`currency.usd` المقبوض بالدولار (المبلغ الأصلي)، و`usd_as_iqd` مقابله بالدينار. `methods.cash_usd` بالدينار.
+
+### `GET /reports/branches-overview`: حقول v6
+لكل فرع وفي المجموع: `queue_now` (حضروا ولم يكتمل دورهم)، `revenue_today_usd` و`revenue_today_usd_iqd` (المقبوض بالدولار ومقابله؛ `revenue_today` يشمل المقابل)، `online_bookings_today`، `refunds_today` و`refunds_today_amount`، `open_shifts`، `shifts_pending_review`. للمدير العام فقط.
+
 ## 20. مصاريف الفروع (Expenses)
 
 ### المبدأ
@@ -3143,6 +3248,25 @@
 * **الأخطاء:** `400 VALIDATION_ERROR`، `404 PATIENT_NOT_FOUND`، `413 ASSISTANT_AUDIO_TOO_LARGE`، `429 RATE_LIMITED` (مع `retry_after_seconds`)، `503 ASSISTANT_UNAVAILABLE`.
 
 ---
+
+### 22.x الدعم والأسئلة الشائعة والتواصل (الجلسة 4)
+| النقطة | من | الوصف |
+| --- | --- | --- |
+| `GET /public/faq` | عام | الأسئلة الفعالة: `{ "items": [ { "faq_id", "category", "category_ar", "question_ar", "answer_ar", "sort", "is_active" } ] }` |
+| `GET /public/contacts` | عام | لكل فرع فعال: `{ "branch_id", "name", "city", "address", "phone", "whatsapp", "whatsapp_url", "call_url", "latitude", "longitude", "directions", "working_hours", "working_hours_schedule", "open_now" }` |
+| `GET /faq-items` | `support.manage` | كل الأسئلة بما فيها الموقوفة |
+| `POST /faq-items` | `support.manage` | `{ "category", "question_ar", "answer_ar", "sort", "is_active" }` ← `201` |
+| `PATCH /faq-items/{faq_id}` | `support.manage` | نفس الحقول (الجزئية) |
+| `DELETE /faq-items/{faq_id}` | `support.manage` | `204` |
+| `POST /me/support-requests` | المراجع | `{ "support_request_id", "type": "booking"|"payment"|"refund"|"app"|"other", "description", "patient_id", "booking_id" }` ← `201` |
+| `GET /me/support-requests` | المراجع | طلباتي مع الرد |
+| `GET /support-requests` | `support.manage` | طلبات الفرع: `status` (`open`|`replied`)، `type`، `page`، `page_size` |
+| `POST /support-requests/{id}/reply` | `support.manage` | `{ "reply": "..." }` |
+
+`SupportRequestDto`: `support_request_id, type, type_ar, description, status, status_ar, patient_id, patient_name, booking_id, booking_label, reply, replied_by_name, replied_at, created_at`.
+
+### `GET /files` (صور النتائج الخارجية والوصفات)
+الاستعلام: `ticket_id` أو `patient_id`، و`purpose` (`external_result` | `prescription`). الرد: `{ "items": [ ... ] }` مع روابط تنزيل مؤقتة.
 
 ## 23. التحويلات للخدمات (المرحلة 5، الترحيل 014)
 

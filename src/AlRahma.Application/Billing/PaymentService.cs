@@ -190,7 +190,7 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
 
         var cash = tenders.Where(t => t.Method == TenderMethods.Cash).Sum(t => t.Amount!.Value);
         return new PaymentResponse(paymentId, shift.ShiftId, paid, deposit, finance.Ref(receipt),
-            cash > 0 ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash > 0);
+            cash > 0 && drawer.Enabled ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash > 0 && drawer.Enabled);
     }
 
     /// <summary>قبض عربون (فك الحظر): دفعة بلا بنود تدخل الدرج، وتضيف المبلغ لرصيد المريض، ويصدر إيصال "عربون".</summary>
@@ -223,7 +223,7 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
         });
         var balance = await finance.CreditBalanceAsync(patient.PatientId, ct) + amount;
         var cash = method == TenderMethods.Cash;
-        return new DepositResult(receipt, cash ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash, balance);
+        return new DepositResult(receipt, cash && drawer.Enabled ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash && drawer.Enabled, balance);
     }
 
     /// <summary>إيصال برقم من كتلة الجهاز المحجوزة (ضمن مداها، ولم يُستخدم الرقم من قبل).</summary>

@@ -119,13 +119,13 @@ public class OfflineTimeTests(TestApp app)
         var booking = await Api.PostAsync(me, "/api/v1/bookings", new { patient_id = patient, session_id = Id(sessions.Body!["items"]![0], "session_id"), visit_kind = "auto" }, Guid.NewGuid());
         Assert.True(booking.Status == 201, booking.Raw);
         var bookingId = Id(booking.Body, "booking_id");
-        var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = bookingId, provider = "sandbox" }, Guid.NewGuid());
+        var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = bookingId, provider = "zaincash" }, Guid.NewGuid());
         var opId = Id(op.Body, "online_payment_id");
 
         // انتهت المهلة وعُلّمت منتهية، ثم وصل تأكيد البوابة بالنجاح
         await app.ScalarAsync<int>($"UPDATE online_payments SET expires_at = now() - interval '1 minute' WHERE online_payment_id = '{opId}' RETURNING 1");
         Assert.Equal("expired", S((await Api.GetAsync(me, $"/api/v1/online-payments/{opId}")).Body, "status"));
-        var done = await Api.PostAsync(me, $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
+        var done = await MockPay.SucceedAsync(me, opId);
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("succeeded", S(done.Body, "status"));
         Assert.Equal("paid", S((await Api.GetAsync(me, $"/api/v1/bookings/{bookingId}")).Body, "payment_status"));

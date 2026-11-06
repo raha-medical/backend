@@ -65,6 +65,7 @@ public interface IAppDbContext
     DbSet<LabResultValue> LabResultValues { get; }
     DbSet<RadiologyReport> RadiologyReports { get; }
     DbSet<OnlinePayment> OnlinePayments { get; }
+    DbSet<MockGatewayTransaction> MockGatewayTransactions { get; }
     DbSet<ReceiptBlock> ReceiptBlocks { get; }
     DbSet<SyncOperation> SyncOperations { get; }
     DbSet<AgentEvent> AgentEvents { get; }
@@ -176,6 +177,8 @@ public interface IObjectStorage
 /// </summary>
 public interface IDrawerTokenIssuer
 {
+    /// <summary>قرار المالك (7.1-أ): درج النقود موقوف، والطابعة فقط. Hardware__CashDrawerEnabled=true يعيده. موقوف = لا توكن ولا open_drawer.</summary>
+    bool Enabled { get; }
     string Issue(string receiptNumber, Guid shiftId, Guid? deviceId);
     /// <summary>توقيع ES256 (DER بصيغة base64) لبيانات يتحقق منها الوكيل بنفس المفتاح العام، مثل كتلة الإيصالات.</summary>
     string Sign(string payload);
@@ -193,6 +196,8 @@ public class ReceiptOptions
     /// <summary>اسم المجمع كما يُطبع على الإيصال.</summary>
     public string ComplexName { get; set; } = "مجمع الرحمة الطبي";
     public string Footer { get; set; } = "لا يعتد بأي إيصال يدوي";
+    /// <summary>7.1-ج: شعار المجمع على الوصل (SVG أو PNG). نسبي = من أصل الواجهة. فارغ = بلا شعار.</summary>
+    public string LogoUrl { get; set; } = "/rahma-mark.svg";
 }
 
 /// <summary>رمز الدخول لتطبيق المريض: عشوائي دائماً. sandbox: الرسالة تذهب لصندوق الرسائل التجريبي. sms: تُرسل فعلاً.</summary>
@@ -245,6 +250,8 @@ public class OnlinePaymentOptions
     /// <summary>العنوان العام للـ API (لبناء redirect_url)، مثل https://api.example.iq. فارغ = رابط نسبي.</summary>
     public string PublicBaseUrl { get; set; } = "";
     public int ExpiryMinutes { get; set; } = 15;
+    /// <summary>إعداد كل بوابة (3.5-ج): Payments__Providers__zaincash__Mode = mock | live | off. غير المضبوط = mock.</summary>
+    public Dictionary<string, AlRahma.Application.PatientApp.Gateways.PaymentProviderOptions> Providers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     /// <summary>C1: الإنتاج يضعها false (Program.cs) فتتعطل البوابة التجريبية وصفحتها، لأنها تسمح بتعليم أي دفعة ناجحة مجاناً.</summary>
     public bool SandboxAllowed { get; set; } = true;
     public bool IsSandbox => SandboxAllowed && string.Equals(Mode, "sandbox", StringComparison.OrdinalIgnoreCase);

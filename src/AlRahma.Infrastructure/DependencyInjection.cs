@@ -34,6 +34,7 @@ public static class DependencyInjection
         services.AddSingleton<IObjectStorage, S3ObjectStorage>();
 
         services.Configure<DrawerOptions>(config.GetSection(DrawerOptions.Section));
+        services.PostConfigure<DrawerOptions>(o => o.CashDrawerEnabled = config.GetValue("Hardware:CashDrawerEnabled", false));
         services.AddSingleton<IDrawerTokenIssuer, DrawerTokenIssuer>();
         services.Configure<ReceiptOptions>(config.GetSection(ReceiptOptions.Section));
         services.Configure<OtpOptions>(config.GetSection(OtpOptions.Section));

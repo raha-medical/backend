@@ -15,7 +15,7 @@ public record PrintTender(string Method, long Amount)
 public record PrintPayloadDto(string ReceiptNumber, string Type, string TypeAr, string BranchName, DateTimeOffset IssuedAt, string CashierName,
     string? PatientName, string? FileNumber, IReadOnlyList<PrintLine> Lines, long DepositUsed, IReadOnlyList<PrintTender> Tenders, long Total,
     string QrCode, string Footer, bool IsCopy, int CopyNumber,
-    string? ClinicName = null, string? DoctorName = null, string? TicketNumber = null)
+    string? ClinicName = null, string? DoctorName = null, string? TicketNumber = null, string? LogoUrl = null)
 {
     /// <summary>حقول العرض بتوقيت بغداد؛ issued_at بتوقيت UTC قد يقع في يوم آخر قرب منتصف الليل.</summary>
     public string IssuedDate => ArabicFormat.IsoDate(IssuedAt);
@@ -99,7 +99,8 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
         return new PrintPayloadDto(r.ReceiptNumber, r.Type, TypeNames[r.Type], $"{finance.Options.ComplexName} - {branch}", r.IssuedAt, cashier,
             patient?.FullName, patient?.FileNumber, lines, depositUsed, tenders, r.Total, finance.QrUrl(r.VerifyCode),
             copyNumber > 1 ? $"نسخة مكررة ({copyNumber}) - {finance.Options.Footer}" : finance.Options.Footer, copyNumber > 1, copyNumber,
-            clinic, doctors.Count == 1 ? doctors[0] : null, tickets.Count == 1 ? tickets[0] : null);
+            clinic, doctors.Count == 1 ? doctors[0] : null, tickets.Count == 1 ? tickets[0] : null,
+            string.IsNullOrWhiteSpace(finance.Options.LogoUrl) ? null : finance.Options.LogoUrl);
     }
 
     /// <summary>إيصالات وردية (الافتراضي ورديتي المفتوحة)، الأحدث أولاً، لإعادة طباعة نسخة.</summary>

@@ -85,6 +85,8 @@ public static class OnlinePaymentStatuses
     public const string Failed = "failed";
     public const string Expired = "expired";
     public const string Refunded = "refunded";
+    /// <summary>المراجع ألغى الدفع في صفحة البوابة (الترحيل 019).</summary>
+    public const string Cancelled = "cancelled";
 }
 
 public static class OnlinePaymentPurposes
@@ -115,6 +117,35 @@ public class OnlinePayment
     public string? RawCallback { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset? CompletedAt { get; set; }
+    /// <summary>مرجع المعاملة لدى البوابة، يُستعلم به عن الحالة (الترحيل 019).</summary>
+    public string? ProviderReference { get; set; }
+    public bool IsSandbox { get; set; }
+    public string? FailureCode { get; set; }
+}
+
+/// <summary>جانب البوابة في الوضع التجريبي (بديل خادم زين كاش / كي كارد). لا يُحفظ PIN ولا CVV (الترحيل 019).</summary>
+public class MockGatewayTransaction
+{
+    public string Reference { get; set; } = "";
+    public string Provider { get; set; } = "";
+    public Guid OnlinePaymentId { get; set; }
+    public long Amount { get; set; }
+    public string Currency { get; set; } = "IQD";
+    public string Status { get; set; } = "pending";
+    public string Step { get; set; } = "credentials";
+    public string? TestAccount { get; set; }
+    public string? AccountMasked { get; set; }
+    public string? FailureCode { get; set; }
+    public short SecretAttempts { get; set; }
+    public short OtpAttempts { get; set; }
+    public short OtpSends { get; set; }
+    public DateTimeOffset? OtpExpiresAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public string? TransactionId { get; set; }
+    public long RefundedAmount { get; set; }
+    public DateTimeOffset? PaidAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
 }
 
 public class ReceiptBlock

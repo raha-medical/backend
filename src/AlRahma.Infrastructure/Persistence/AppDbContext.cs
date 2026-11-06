@@ -70,6 +70,7 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<LabResultValue> LabResultValues => Set<LabResultValue>();
     public DbSet<RadiologyReport> RadiologyReports => Set<RadiologyReport>();
     public DbSet<OnlinePayment> OnlinePayments => Set<OnlinePayment>();
+    public DbSet<MockGatewayTransaction> MockGatewayTransactions => Set<MockGatewayTransaction>();
     public DbSet<ReceiptBlock> ReceiptBlocks => Set<ReceiptBlock>();
     public DbSet<SyncOperation> SyncOperations => Set<SyncOperation>();
     public DbSet<AgentEvent> AgentEvents => Set<AgentEvent>();
@@ -431,6 +432,11 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
             e.Property(x => x.Value).HasPrecision(12, 4);
         });
         b.Entity<RadiologyReport>(e => { e.ToTable("radiology_reports"); e.HasKey(x => x.OrderItemId); });
+        b.Entity<MockGatewayTransaction>(e =>
+        {
+            e.ToTable("mock_gateway_transactions");
+            e.HasKey(x => x.Reference);
+        });
         b.Entity<OnlinePayment>(e =>
         {
             e.ToTable("online_payments");

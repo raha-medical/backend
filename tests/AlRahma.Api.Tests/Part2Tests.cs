@@ -219,27 +219,27 @@ public class Part2Tests(TestApp app)
         Assert.Equal(403, (await Api.PostAsync(app.Client(pharm), "/api/v1/bookings", new { patient_id = patient, session_id = session }, Guid.NewGuid())).Status);
         Assert.Contains((await Api.GetAsync(me, "/api/v1/bookings/my")).Body!["items"]!.AsArray(), b => Id(b, "booking_id") == bookingId);
 
-        // الدفع الإلكتروني عبر البوابة التجريبية
+        // الدفع الإلكتروني عبر البوابة التجريبية (زين كاش)
         Assert.Equal("PROVIDER_NOT_AVAILABLE", (await Api.PostAsync(me, "/api/v1/online-payments",
-            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "zaincash" }, Guid.NewGuid())).Code);
+            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "fib" }, Guid.NewGuid())).Code);
         var op = await Api.PostAsync(me, "/api/v1/online-payments",
-            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "sandbox" }, Guid.NewGuid());
+            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "zaincash" }, Guid.NewGuid());
         Assert.True(op.Status == 201, op.Raw);
         Assert.Equal("pending", S(op.Body, "status"));
         Assert.Equal(25000, op.Body!["amount"]!.GetValue<long>());
         var opId = Id(op.Body, "online_payment_id");
-        var page = await app.Client().GetAsync($"/api/v1/sandbox/pay/{opId}");
-        Assert.Contains("text/html", page.Content.Headers.ContentType!.ToString());
-        // أمان: إكمال الدفع بلا تسجيل دخول مرفوض في كل البيئات
-        Assert.Equal(401, (await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" })).Status);
+        // أمان: نقطة الإكمال القديمة أُزيلت، والاستعلام وصفحة البوابة بلا تسجيل دخول مرفوضان في كل البيئات
+        Assert.Contains((await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" })).Status, new[] { 401, 404 });
+        Assert.Equal(401, (await Api.PostAsync(app.Client(), $"/api/v1/online-payments/{opId}/verify")).Status);
+        Assert.Equal(401, (await Api.GetAsync(app.Client(), $"/api/v1/mock-gateway/{S(op.Body, "provider_reference")}")).Status);
         Assert.Equal("pending", S((await Api.GetAsync(me, $"/api/v1/online-payments/{opId}")).Body, "status"));
-        var done = await Api.PostAsync(me, $"/api/v1/sandbox/pay/{opId}", new { result = "succeeded" });
+        var done = await MockPay.SucceedAsync(me, opId);
         Assert.True(done.Status == 200, done.Raw);
         Assert.Equal("succeeded", S(done.Body, "status"));
         Assert.StartsWith("B1-O-", S(done.Body!["receipt"], "receipt_number"));
         Assert.Equal("paid", S((await Api.GetAsync(me, $"/api/v1/bookings/{bookingId}")).Body, "payment_status"));
         Assert.Equal("ALREADY_PAID", (await Api.PostAsync(me, "/api/v1/online-payments",
-            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "sandbox" }, Guid.NewGuid())).Code);
+            new { purpose = "booking_full", patient_id = childId, booking_id = bookingId, provider = "zaincash" }, Guid.NewGuid())).Code);
 
         // تثبيت الحضور: الكشفية مدفوعة مسبقاً
         var checkIn = await Api.PostAsync(s.Reception, "/api/v1/queue/check-in", new { booking_id = bookingId }, Guid.NewGuid());

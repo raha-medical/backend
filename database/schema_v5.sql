@@ -815,7 +815,7 @@ CREATE TABLE online_payments (
     invoice_item_id           UUID REFERENCES invoice_items(invoice_item_id),   -- بند واحد من الفاتورة، وNULL يعني كل بنودها (الترحيل 016)
     provider                  VARCHAR(20) NOT NULL CHECK (provider IN ('zaincash', 'qicard', 'card', 'fib', 'sandbox')),
     amount                    BIGINT NOT NULL CHECK (amount > 0),
-    status                    VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed', 'expired', 'refunded')),
+    status                    VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'succeeded', 'failed', 'expired', 'refunded', 'cancelled')),  -- cancelled: الترحيل 019
     provider_transaction_id   VARCHAR(100) UNIQUE,
     redirect_url              VARCHAR(1000),
     expires_at                TIMESTAMPTZ NOT NULL,
@@ -823,10 +823,40 @@ CREATE TABLE online_payments (
     raw_callback              JSONB,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
     completed_at              TIMESTAMPTZ,
+    provider_reference        VARCHAR(60),                          -- مرجع المعاملة لدى البوابة (الترحيل 019)
+    is_sandbox                BOOLEAN NOT NULL DEFAULT FALSE,       -- دفعة تجريبية، تظهر للإدارة فقط (الترحيل 019)
+    failure_code              VARCHAR(40),                          -- سبب الفشل من البوابة (الترحيل 019)
     CHECK (purpose NOT IN ('booking_full', 'booking_deposit') OR booking_id IS NOT NULL),
     CHECK (purpose <> 'invoice' OR invoice_id IS NOT NULL)
 );
 CREATE INDEX idx_online_payments_patient ON online_payments(patient_id);
+CREATE INDEX idx_online_payments_pending ON online_payments(status, expires_at) WHERE status IN ('pending', 'expired');
+
+-- جانب «البوابة» في الوضع التجريبي لزين كاش وكي كارد (الترحيل 019)
+CREATE TABLE mock_gateway_transactions (
+    reference           VARCHAR(60) PRIMARY KEY,
+    provider            VARCHAR(20) NOT NULL CHECK (provider IN ('zaincash', 'qicard')),
+    online_payment_id   UUID NOT NULL,
+    amount              BIGINT NOT NULL CHECK (amount > 0),
+    currency            VARCHAR(3) NOT NULL DEFAULT 'IQD',
+    status              VARCHAR(10) NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'failed', 'cancelled', 'refunded')),
+    step                VARCHAR(12) NOT NULL DEFAULT 'credentials' CHECK (step IN ('credentials', 'otp', 'processing', 'done')),
+    test_account        VARCHAR(30),
+    account_masked      VARCHAR(30),
+    failure_code        VARCHAR(40),
+    secret_attempts     SMALLINT NOT NULL DEFAULT 0,
+    otp_attempts        SMALLINT NOT NULL DEFAULT 0,
+    otp_sends           SMALLINT NOT NULL DEFAULT 0,
+    otp_expires_at      TIMESTAMPTZ,
+    expires_at          TIMESTAMPTZ NOT NULL,
+    transaction_id      VARCHAR(60) UNIQUE,
+    refunded_amount     BIGINT NOT NULL DEFAULT 0,
+    paid_at             TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_mock_gateway_op ON mock_gateway_transactions(online_payment_id);
+
 
 -- =============================================================================
 -- 12. التحصيل والاسترجاع ورصيد المريض

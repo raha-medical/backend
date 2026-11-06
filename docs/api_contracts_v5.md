@@ -1407,7 +1407,7 @@
 * **الصلاحية:** `patient` (لمريض مربوط بحسابه). **Headers:** `Idempotency-Key`.
 * **Request:**
 ```json
-{ "online_payment_id": "op_331", "purpose": "booking_full", "patient_id": "pat_01", "booking_id": "bk_01", "invoice_id": null, "provider": "sandbox" }
+{ "online_payment_id": "op_331", "purpose": "booking_full", "patient_id": "pat_01", "booking_id": "bk_01", "invoice_id": null, "provider": "zaincash" }
 ```
 * `purpose`:
   * `booking_full`: كامل كشفية الحجز (`booking_id`).
@@ -1418,35 +1418,44 @@
 * المبلغ يحسبه السيرفر ولا يُرسل من التطبيق.
 * **Response (201):**
 ```json
-{ "online_payment_id": "op_331", "purpose": "booking_full", "amount": 25000, "status": "pending", "provider": "sandbox",
-  "redirect_url": "https://api.example.iq/api/v1/sandbox/pay/op_331", "expires_at": "2026-11-02T09:15:00Z", "receipt": null }
+{ "online_payment_id": "op_331", "purpose": "booking_full", "amount": 25000, "status": "pending", "provider": "zaincash",
+  "provider_reference": "ZC-3F2A9C0D7E1B4A6", "redirect_url": "https://api.example.iq/api/v1/mock-gateway/ZC-3F2A9C0D7E1B4A6",
+  "expires_at": "2026-11-02T09:15:00Z", "receipt": null, "failure_code": null }
 ```
-* التطبيق يفتح `redirect_url` في متصفح داخلي. الصلاحية 15 دقيقة، ثم `expired`.
+* `provider`: `zaincash` | `qicard` (المتاح من `GET /online-payments/providers`). غير المتاح: `422 PROVIDER_NOT_AVAILABLE`.
+* المعاملة تُنشأ لدى البوابة فوراً (`provider_reference`). في الوضع التجريبي صفحة البوابة داخل التطبيق (`/mock-gateway/{reference}`)، ومع بوابة حقيقية يُفتح `redirect_url`. الصلاحية 15 دقيقة، ثم `expired`.
 * أخطاء: `409 BOOKING_NOT_ACTIVE`، `409 ALREADY_PAID` (الحجز أو الفاتورة مدفوعة)، `409 PATIENT_NOT_BANNED` (عربون فك حظر لمريض غير محظور)، `409 PAYMENT_PENDING` مع `online_payment_id` (عملية معلقة لنفس الغرض، أكملها أو انتظر انتهاءها).
 
 ### `GET /online-payments/{online_payment_id}`
 * **الصلاحية:** `patient` صاحب العملية، أو `reports.finance`.
 * **Response (200):** نفس شكل الإنشاء. بعد النجاح `receipt` = `{ "receipt_id", "receipt_number": "B1-O-000045", "qr_code" }`.
-* `status`: `pending` | `succeeded` | `failed` | `expired` | `refunded`.
+* يستعلم من البوابة قبل الرد إن كانت العملية معلقة. `status`: `pending` | `succeeded` (مدفوعة) | `failed` | `cancelled` | `expired` | `refunded`، و`failure_code` عند الفشل. `is_sandbox` للموظفين فقط.
+
+### `POST /online-payments/{online_payment_id}/verify`
+* **الصلاحية:** `patient` صاحب العملية، أو `reports.finance`. بعد العودة من صفحة البوابة: استعلام رسمي من البوابة (`InquireAsync`) ثم تطبيق النتيجة. **هذا الطريق الوحيد** لتعليم الحجز مدفوعاً (مع الـ Webhook الموقّع والمهمة الدورية).
+
+### `GET /online-payments/providers`
+* `[{ "code": "zaincash", "name_ar": "زين كاش", "mode": "mock" }, …]` حسب `Payments__Providers__{code}__Mode` = `mock` | `live` | `off`.
 * **حدث مباشر:** `online_payment.updated` على `patient_account:{id}` بنفس الشكل.
 
 ### `POST /webhooks/payments/{provider}`
-* **حالياً:** لا توجد بوابة حقيقية مربوطة، فيعيد `404 PROVIDER_NOT_AVAILABLE`. البوابة التجريبية تستخدم `POST /sandbox/pay/{id}` بنفس المنطق تماماً.
-* **الصلاحية:** البوابة فقط (توقيع HMAC). Idempotent على `provider_transaction_id`. **Response:** `200` بدون جسم.
+* **الصلاحية:** البوابة فقط: توقيع HMAC-SHA256 للجسم في `X-Signature` بسر `Payments__Providers__{provider}__WebhookSecret`. بلا توقيع صالح `401 INVALID_SIGNATURE`. الجسم فيه `reference` فقط يُعتمد، والحالة تُؤخذ من الاستعلام لا من الإشعار. **Response:** `200 { "status": … }`.
 * **عند النجاح:**
   * `booking_full`: الحجز `payment_status: "paid"`، وتُنشأ فاتورته مدفوعة عند تثبيت الحضور.
   * `booking_deposit`: العربون يُضاف لرصيد المريض (`kind: booking_deposit`)، ويظهر في سلة الاستقبال كرصيد `deposit_credit` عند الوصول، ويُستخدم بـ `use_deposit_credit` في `POST /payments` (القسم 9). الحجز `payment_status: "deposit_paid"`.
   * `unban_deposit`: يُرفع الحظر فوراً ويُضاف المبلغ لرصيد المريض.
   * `invoice`: البنود تصبح مدفوعة، والطلبات الطبية تظهر للمختبر والأشعة.
 
-### البوابة التجريبية (Sandbox فقط)
-* `GET /sandbox/pay/{online_payment_id}`: صفحة HTML بسيطة بزرين "نجاح" و"فشل" بدل صفحة البوابة.
-* `POST /sandbox/pay/{online_payment_id}` مع `{ "result": "succeeded" }` أو `"failed"`: يحاكي الـ Webhook (للاختبار الآلي). **Response (200):** كائن الدفع بعد التحديث (`receipt` عند النجاح). في الإنتاج: `404`.
-* `Payments__PublicBaseUrl` على السيرفر هو بادئة `redirect_url` (العنوان الذي يصله هاتف المريض).
-* `provider` غير `sandbox` حالياً: `422 PROVIDER_NOT_AVAILABLE`.
+### البوابة التجريبية لزين كاش وكي كارد (mock، غير متاحة في الإنتاج)
+* كل النقاط تتطلب توكن المريض صاحب الدفعة (غيره 404). تغيّر حالة المعاملة لدى «البوابة» فقط، والحجز لا يتغير حتى `verify`.
+* `GET /mock-gateway/{reference}`: `{ reference, provider, merchant_name, amount, currency, status, step: credentials|otp|processing|done, account_masked, failure_code, secret_attempts_left, otp_attempts_left, otp_length, otp_expires_at, otp_resend_at, otp_resends_left, expires_at }`.
+* `POST /mock-gateway/{reference}/credentials`: زين كاش `{ wallet_number, pin }`، كي كارد `{ card_number, expiry: "MM/YY", cvv }`. أخطاء: `422 WRONG_PIN | WRONG_CARD_DATA | ACCOUNT_NOT_FOUND | CARD_NOT_FOUND`، و`503 GATEWAY_UNAVAILABLE`.
+* `POST /mock-gateway/{reference}/otp` `{ otp }` (4 أرقام لزين كاش و6 لكي): `422 WRONG_OTP | OTP_EXPIRED`، و`504 GATEWAY_TIMEOUT`. و`POST …/otp/resend` (`429 OTP_RESEND_TOO_SOON | OTP_RESEND_LIMIT`)، و`POST …/cancel`.
+* بيانات الاختبار الثابتة ونتائجها: `dock/docs/review/audit-logic.md`، قسم «بيانات اختبار البوابة التجريبية».
+* `Payments__PublicBaseUrl` على السيرفر هو بادئة `redirect_url`. نقطة الإكمال القديمة `POST /sandbox/pay/{id}` أُزيلت (كانت تقبل طلباً بلا تسجيل دخول).
 
 ### استرجاع الدفع الإلكتروني
-* `POST /invoice-items/{id}/refunds` بطريقة `online_reversal` (القسم 8) يعكس المبلغ عبر البوابة. في الوضع التجريبي يتم فوراً.
+* `POST /invoice-items/{id}/refunds` بطريقة `online_reversal` (القسم 8) يعكس المبلغ عبر البوابة (`RefundAsync`)، ورفض البوابة يلغي الاسترجاع (`502 GATEWAY_REFUND_FAILED`).
 * إلغاء حجز مدفوع إلكترونياً يحول المبلغ إلى رصيد للمريض (القسم 5) ما لم يطلب المحاسب الاسترجاع.
 
 ---
@@ -2649,7 +2658,7 @@
 * **التحصيل الأوفلاين في ورديته (C3):** `payment.create` يحمل `shift_id` (الوردية المفتوحة على الجهاز وقت القبض). تُسجل الدفعة فيها وباسم صاحبها حتى لو أُغلقت قبل المزامنة، بشرط أن تكون لنفس الجهاز ورقم الإيصال من كتلته. إن كانت مغلقة: تُعاد حسابات المتوقع والفرق، والمراجَعة تعود «بانتظار المراجعة»، ويصل المحاسب إشعار `shift.late_payment`، والنتيجة تحمل تحذير `LATE_PAYMENT_CLOSED_SHIFT`. بدون `shift_id` يُستخدم السلوك السابق (وردية من يزامن).
 * `warnings[]`: `{ "code", "patient_id", "detail" }`، و`detail` نص عربي اختياري.
 
-> **الإنتاج (C1):** في بيئة Production تتعطل البوابة التجريبية (`/sandbox/pay/*` يرد 404، و`POST /online-payments` يرد `422 PROVIDER_NOT_AVAILABLE`، و`payment_options` للحجز لا تعرض الدفع الإلكتروني) حتى تُربط بوابة حقيقية. ويرفض الخادم التشغيل إذا كان `Jwt__SigningKey` أقصر من 32 حرفاً أو تجريبياً، أو كلمة مرور قاعدة البيانات `CHANGE_ME`، أو كلمة مرور المدير الأولى الافتراضية. رمز دخول المريض عشوائي دائماً، و`sandbox_code` لا يُعاد إلا في الاختبارات.
+> **الإنتاج (C1):** في بيئة Production تتعطل البوابة التجريبية (`mock`، فلا تُعرض في `providers`، و`POST /online-payments` يرد `422 PROVIDER_NOT_AVAILABLE`، و`payment_options` للحجز لا تعرض الدفع الإلكتروني) حتى تُربط بوابة حقيقية. ويرفض الخادم التشغيل إذا كان `Jwt__SigningKey` أقصر من 32 حرفاً أو تجريبياً، أو كلمة مرور قاعدة البيانات `CHANGE_ME`، أو كلمة مرور المدير الأولى الافتراضية. رمز دخول المريض عشوائي دائماً، و`sandbox_code` لا يُعاد إلا في الاختبارات.
 > **الدفع الإلكتروني المتأخر (H1):** نجاح يصل بعد انتهاء المهلة (حتى لو عُلّمت `expired`) يُسجل دفعة وإيصالاً: يُطبق على الحجز إن بقي صالحاً، وإلا يصبح رصيداً للمريض، ويُشعر المحاسب.
 > **لقطة الأوفلاين:** `GET /sync/snapshot` لمن يملك `patients.write` (الاستقبال والإدارة) فقط، وإلا `403`.
 * الحد: 500 عملية في الدفعة.

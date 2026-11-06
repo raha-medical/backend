@@ -44,8 +44,9 @@ public class BillingTests(TestApp app)
 
         var paid = await Api.PostAsync(s.Reception, "/api/v1/payments", pay, Guid.NewGuid());
         Assert.Equal(201, paid.Status);
-        Assert.True(paid.Body!["open_drawer"]!.GetValue<bool>());
-        Assert.Equal(3, S(paid.Body, "drawer_token").Split('.').Length);
+        // 7.1-أ: درج النقود موقوف بالكامل (الطابعة فقط): لا توكن ولا فتح درج
+        Assert.False(paid.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.Null(paid.Body!["drawer_token"]?.GetValue<string>());
         var receipt = paid.Body!["receipt"]!;
         Assert.Contains("-R-", S(receipt, "receipt_number"));
         Assert.Equal("ITEM_NOT_PAYABLE", (await Api.PostAsync(s.Reception, "/api/v1/payments", pay, Guid.NewGuid())).Code);
@@ -83,7 +84,7 @@ public class BillingTests(TestApp app)
         Assert.Equal(-7000, L(refund.Body, "doctor_share_adjustment"));
         Assert.Equal(-3000, L(refund.Body, "complex_share_adjustment"));
         Assert.Equal(15000, L(refund.Body, "invoice_paid_after"));
-        Assert.True(refund.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.False(refund.Body!["open_drawer"]!.GetValue<bool>());
         Assert.Contains("-RF-", S(refund.Body!["receipt"], "receipt_number"));
         Assert.Equal("REFUND_EXCEEDS_PAID", (await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
             new { amount = 20000, method = "cash", reason = "x" }, Guid.NewGuid())).Code);
@@ -158,7 +159,7 @@ public class BillingTests(TestApp app)
         Assert.False(unban.Body!["is_banned"]!.GetValue<bool>());
         Assert.Equal(10000, L(unban.Body, "deposit_credit"));
         Assert.Equal("deposit", S(unban.Body!["receipt"], "type"));
-        Assert.True(unban.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.False(unban.Body!["open_drawer"]!.GetValue<bool>());
 
         // التحصيل باستخدام الرصيد
         var basket = await Api.GetAsync(rec, $"/api/v1/patients/{patient}/billable-items?department=lab");

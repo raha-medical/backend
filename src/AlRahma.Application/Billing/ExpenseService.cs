@@ -81,7 +81,7 @@ public class ExpenseService(IAppDbContext db, ICurrentUser current, IAuditLogger
         if (tx is not null) await tx.CommitAsync(ct);
 
         var dto = (await ToDtosAsync([expense], ct)).Single();
-        return shift is null ? dto : dto with { DrawerToken = drawer.Issue(expense.ExpenseNumber, shift.ShiftId, shift.DeviceId), OpenDrawer = true };
+        return shift is null || !drawer.Enabled ? dto : dto with { DrawerToken = drawer.Issue(expense.ExpenseNumber, shift.ShiftId, shift.DeviceId), OpenDrawer = true };
     }
 
     public async Task<ExpenseDto> GetAsync(Guid expenseId, CancellationToken ct)

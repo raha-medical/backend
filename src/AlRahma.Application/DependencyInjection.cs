@@ -70,6 +70,11 @@ public static class DependencyInjection
         services.AddScoped<Assistant.AssistantTools>();
         services.AddScoped<Assistant.AssistantService>();
         services.AddScoped<PatientApp.OnlinePaymentService>();
+        // طبقة الدفع الموحدة (3.5): التنفيذ يُختار بالإعداد Payments__Providers__{name}__Mode. البوابة الحقيقية تُسجَّل هنا بـ Mode = "live".
+        services.AddScoped<PatientApp.Gateways.IPaymentGateway, PatientApp.Gateways.ZainCashMockGateway>();
+        services.AddScoped<PatientApp.Gateways.IPaymentGateway, PatientApp.Gateways.QiCardMockGateway>();
+        services.AddScoped<PatientApp.Gateways.PaymentGatewayRegistry>();
+        services.AddScoped<PatientApp.Gateways.MockGatewayService>();
         services.AddScoped<Clinical.ReferralTracker>();
         services.AddScoped<Clinical.ReferralService>();
         services.AddScoped<Clinical.MedicalOrderSync>();

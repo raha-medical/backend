@@ -21,6 +21,12 @@ public class FilesController(FileService files) : ControllerBase
     [ProducesResponseType<FileStatusResponse>(200)]
     public Task<FileStatusResponse> Complete(Guid fileId, CancellationToken ct) => files.CompleteAsync(fileId, ct);
 
+    /// <summary>صور النتائج الخارجية والوصفات لمراجع أو دور، مع روابط تنزيل مؤقتة (purpose = external_result | prescription).</summary>
+    [HttpGet]
+    public async Task<IActionResult> List([FromQuery(Name = "ticket_id")] Guid? ticketId, [FromQuery(Name = "patient_id")] Guid? patientId,
+        [FromQuery(Name = "purpose")] string? purpose, CancellationToken ct) =>
+        Ok(new { items = await files.ListPatientFilesAsync(ticketId, patientId, purpose, ct) });
+
     [HttpGet("{fileId:guid}/download-url")]
     [ProducesResponseType<DownloadUrlResponse>(200)]
     public Task<DownloadUrlResponse> DownloadUrl(Guid fileId, CancellationToken ct) => files.DownloadUrlAsync(fileId, ct);

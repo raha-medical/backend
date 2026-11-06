@@ -91,4 +91,8 @@ public class InvoiceItem
     public string Status { get; set; } = InvoiceItemStatuses.Unpaid;
     public DateTimeOffset? PerformedAt { get; set; }
     public DateTimeOffset CreatedAt { get; set; }
+    /// <summary>عملة سعر الخدمة (الترحيل 023). لبند USD: السعر الأصلي بالدولار وسعر الصرف، و unit_price بالدينار.</summary>
+    public string Currency { get; set; } = "IQD";
+    public long? OriginalUnitPrice { get; set; }
+    public int? ExchangeRate { get; set; }
 }

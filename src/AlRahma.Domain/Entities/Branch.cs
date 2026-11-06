@@ -8,6 +8,8 @@ public class Branch
     public string? City { get; set; }
     public string? Address { get; set; }
     public string? Phone { get; set; }
+    /// <summary>رقم واتساب الفرع (الترحيل 021).</summary>
+    public string? Whatsapp { get; set; }
     /// <summary>موقع الفرع على الخريطة (لتطبيق المريض).</summary>
     public decimal? Latitude { get; set; }
     public decimal? Longitude { get; set; }

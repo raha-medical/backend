@@ -26,6 +26,11 @@ public record BookingDto(Guid BookingId, Guid PatientId, string PatientName, Gui
     public DateTimeOffset? CheckedInAt { get; init; }
     /// <summary>patient | staff | system | null.</summary>
     public string? CancelledBy { get; init; }
+    /// <summary>5.1-ب: credit | rebooked | refunded | null.</summary>
+    public string? CancelResolution { get; init; }
+    /// <summary>ألغى الطبيب جدوله وصار المدفوع رصيداً، والمراجع لم يختر بعد: اعرض الخيارات الثلاثة.</summary>
+    public bool CancelOptionsPending { get; init; }
+    public Guid? RebookedBookingId { get; init; }
 }
 /// <summary>تنبيه لا يمنع الحجز، مثل BOOKING_TIME_OVERLAP (حجز آخر عند طبيب آخر قريب من نفس الوقت).</summary>
 public record BookingWarning(string Code, string Message, Guid? BookingId = null);
@@ -730,6 +735,9 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
                 b.CancelReason, b.CreatedAt)
             {
                 RescheduleCount = b.RescheduleCount, CheckInMethod = b.CheckInMethod, CheckedInAt = b.CheckedInAt, CancelledBy = b.CancelledBy,
+                CancelResolution = b.CancelResolution, RebookedBookingId = b.RebookedBookingId,
+                CancelOptionsPending = b.Status == BookingStatuses.Cancelled && b.CancelledBy != "patient" && b.Session.Status == SessionStatuses.Cancelled
+                                       && b.PaymentStatus == PaymentStatuses.Credited && b.CancelResolution == null,
                 BranchId = b.Session.BranchId, BranchName = branchNames.GetValueOrDefault(b.Session.BranchId),
             };
         }).ToList();

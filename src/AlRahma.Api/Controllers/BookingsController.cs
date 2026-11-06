@@ -10,8 +10,21 @@ namespace AlRahma.Api.Controllers;
 
 [ApiController]
 [Produces("application/json")]
-public class BookingsController(BookingService bookings, AlRahma.Application.Queue.QueueService queue, ICurrentUser current) : ControllerBase
+public class BookingsController(BookingService bookings, AlRahma.Application.Queue.QueueService queue, ICurrentUser current,
+    DoctorCancelOptionsService cancelOptions) : ControllerBase
 {
+    /// <summary>5.1-ب: خيارات المراجع بعد إلغاء الطبيب جدوله: rebook (أقرب موعد من الرصيد) | credit (رصيد) | refund (البوابة).</summary>
+    [HttpGet("api/v1/me/bookings/{bookingId:guid}/cancellation-options")]
+    [Authorize(Policy = Policies.Patient)]
+    [ProducesResponseType<CancelOptionsDto>(200)]
+    public Task<CancelOptionsDto> CancelOptions(Guid bookingId, CancellationToken ct) => cancelOptions.OptionsAsync(bookingId, ct);
+
+    [HttpPost("api/v1/me/bookings/{bookingId:guid}/cancellation-choice")]
+    [Authorize(Policy = Policies.Patient)]
+    [ProducesResponseType<CancelChoiceResponse>(200)]
+    public Task<CancelChoiceResponse> CancelChoice(Guid bookingId, CancelChoiceRequest req, CancellationToken ct) =>
+        cancelOptions.ChooseAsync(bookingId, req, ct);
+
     /// <summary>حجز هاتفي من الاستقبال (queue.manage)، أو حجز المريض من التطبيق بتوكنه.</summary>
     [HttpPost("api/v1/bookings")]
     [Authorize(Policy = Policies.StaffOrPatient)]

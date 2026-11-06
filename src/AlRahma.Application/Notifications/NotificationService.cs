@@ -60,6 +60,8 @@ public static class NotificationTypes
     public const string BackupFailed = "backup.failed";
     public const string ReferralCreated = "referral.created";
     public const string ReferralActivated = "referral.activated";
+    public const string SupportReplied = "support.replied";
+    public const string SupportRequestCreated = "support.request_created";
 }
 
 /// <summary>
@@ -138,6 +140,26 @@ public class NotificationService(IAppDbContext db, ICurrentUser current, IClock 
         foreach (var t in tokens) QueuePush(t.PushToken, t.PatientAccountId, null, $"{title}: {message}", data);
         await db.SaveChangesAsync(ct);
         foreach (var n in rows) await realtime.SendAsync(RealtimeGroups.PatientAccount(n.PatientAccountId!.Value), "notification.created", ToDto(n));
+    }
+
+    /// <summary>إشعار لحساب مريض واحد (Push داخل التطبيق)، مثل الرد على طلب الدعم.</summary>
+    public async Task NotifyAccountAsync(Guid accountId, Guid? branchId, string type, string title, string message,
+        string? linkType, Guid? linkId, CancellationToken ct)
+    {
+        var n = new Notification
+        {
+            NotificationId = UuidV7.New(), PatientAccountId = accountId, BranchId = branchId, Type = type, Title = title, Message = message,
+            LinkType = linkType, LinkId = linkId, CreatedAt = clock.UtcNow,
+        };
+        db.Notifications.Add(n);
+        var tokens = await db.PushDevices.AsNoTracking().Where(d => d.PatientAccountId == accountId).Select(d => d.PushToken).ToListAsync(ct);
+        var data = System.Text.Json.JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["type"] = type, ["link_type"] = linkType, ["link_id"] = linkId, ["sound"] = "default", ["priority"] = "normal", ["require_ack"] = false,
+        });
+        foreach (var t in tokens) QueuePush(t, accountId, null, $"{title}: {message}", data);
+        await db.SaveChangesAsync(ct);
+        await realtime.SendAsync(RealtimeGroups.PatientAccount(accountId), "notification.created", ToDto(n));
     }
 
     /// <summary>إشعار booking.cancelled لمرضى الحجوزات النشطة في الوجبات قبل إلغائها (تُقرأ قبل تنفيذ الإلغاء).</summary>

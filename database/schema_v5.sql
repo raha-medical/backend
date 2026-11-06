@@ -1354,3 +1354,206 @@ CREATE INDEX IF NOT EXISTS idx_staff_liabilities_user ON staff_liabilities(user_
 INSERT INTO system_settings (branch_id, key, value)
 SELECT NULL, 'billing.collection_mode', '"central"'
  WHERE NOT EXISTS (SELECT 1 FROM system_settings WHERE branch_id IS NULL AND key = 'billing.collection_mode');
+
+-- =============================================================================
+-- ترحيل 021: الجلسة 4 (التدقيق: قسم الدعم، 1.2-ج3، 5.1-ب)
+-- =============================================================================
+
+-- ---------------------------------------------------------------- الملفات
+ALTER TABLE files ADD COLUMN IF NOT EXISTS ticket_id UUID REFERENCES queue_tickets(ticket_id);
+ALTER TABLE files ADD COLUMN IF NOT EXISTS patient_id UUID REFERENCES patients(patient_id);
+CREATE INDEX IF NOT EXISTS idx_files_ticket ON files(ticket_id) WHERE ticket_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_files_patient ON files(patient_id) WHERE patient_id IS NOT NULL;
+DO $$
+DECLARE c TEXT;
+BEGIN
+    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'files'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%purpose%' LOOP
+        EXECUTE format('ALTER TABLE files DROP CONSTRAINT %I', c);
+    END LOOP;
+END $$;
+ALTER TABLE files ADD CONSTRAINT ck_files_purpose
+    CHECK (purpose IN ('lab', 'radiology', 'doctor_photo', 'external_result', 'prescription'));
+
+-- ---------------------------------------------------------------- الفرع
+ALTER TABLE branches ADD COLUMN IF NOT EXISTS whatsapp VARCHAR(30);
+
+-- ---------------------------------------------------------------- الأسئلة الشائعة
+CREATE TABLE IF NOT EXISTS faq_items (
+    faq_id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    category        VARCHAR(20) NOT NULL CHECK (category IN ('booking', 'cancel', 'payment', 'refund', 'hours', 'app', 'other')),
+    question_ar     VARCHAR(300) NOT NULL,
+    answer_ar       TEXT NOT NULL,
+    sort            INTEGER NOT NULL DEFAULT 0,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_faq_question ON faq_items(question_ar);
+CREATE INDEX IF NOT EXISTS idx_faq_active ON faq_items(category, sort) WHERE is_active;
+
+INSERT INTO faq_items (category, question_ar, answer_ar, sort) VALUES
+    ('booking', 'كيف أحجز موعداً؟', 'اختر الفرع ثم الطبيب ثم اليوم المتاح، وأكّد الحجز. يصلك إشعار بموعدك ورقمك، ويمكنك الدفع إلكترونياً أو عند الوصول.', 10),
+    ('booking', 'كيف أؤكد حضوري عند الوصول؟', 'امسح رمز QR الظاهر على شاشة الانتظار من التطبيق، أو راجع الاستقبال.', 20),
+    ('cancel', 'إذا ألغى الطبيب جدوله، ماذا يحدث لمبلغي؟', 'يُضاف ما دفعته رصيداً في محفظتك فوراً. يمكنك استخدامه لأي حجز، أو طلب استرجاعه إلى وسيلة الدفع نفسها، أو نقل موعدك إلى أقرب موعد للطبيب نفسه.', 30),
+    ('cancel', 'إذا ألغيت حجزي بنفسي؟', 'خلال مدة الإلغاء المجاني يعود المبلغ رصيداً. بعدها قد تُطبَّق رسوم الإلغاء المتأخر الظاهرة عند الإلغاء.', 40),
+    ('refund', 'إذا دفعت ولم أحضر؟', 'يتحول المبلغ رصيداً في محفظتك تستخدمه لاحقاً، ولا يُسترجع نقداً.', 50),
+    ('refund', 'كيف يتم الاسترجاع النقدي من الاستقبال؟', 'يتم بطلب من الموظف وموافقة محاسب الفرع، مع ذكر السبب، ويصدر لك وصل استرجاع.', 60),
+    ('payment', 'ما طرق الدفع المتاحة؟', 'نقداً أو بالبطاقة في الاستقبال، أو إلكترونياً من التطبيق عبر زين كاش أو كي كارد.', 70),
+    ('hours', 'ما أوقات الدوام؟', 'أوقات دوام كل فرع ظاهرة في صفحة «تواصل مع المجمع» وفي صفحة الفرع.', 80)
+ON CONFLICT (question_ar) DO NOTHING;
+
+-- ---------------------------------------------------------------- طلبات الدعم
+CREATE TABLE IF NOT EXISTS support_requests (
+    support_request_id  UUID PRIMARY KEY,
+    patient_account_id  UUID NOT NULL REFERENCES patient_accounts(patient_account_id),
+    patient_id          UUID REFERENCES patients(patient_id),
+    booking_id          UUID REFERENCES bookings(booking_id),
+    branch_id           UUID REFERENCES branches(branch_id),
+    type                VARCHAR(10) NOT NULL CHECK (type IN ('booking', 'payment', 'refund', 'app', 'other')),
+    description         TEXT NOT NULL,
+    status              VARCHAR(10) NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'replied', 'closed')),
+    reply               TEXT,
+    replied_by          UUID REFERENCES users(user_id),
+    replied_at          TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CHECK ((status = 'open') = (replied_at IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_support_account ON support_requests(patient_account_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_support_status ON support_requests(status, created_at);
+
+-- ---------------------------------------------------------------- خيارات المراجع بعد إلغاء الطبيب (5.1-ب)
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS cancel_resolution VARCHAR(10);
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS rebooked_booking_id UUID REFERENCES bookings(booking_id);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_bookings_cancel_resolution') THEN
+        ALTER TABLE bookings ADD CONSTRAINT ck_bookings_cancel_resolution
+            CHECK (cancel_resolution IS NULL OR cancel_resolution IN ('credit', 'rebooked', 'refunded'));
+    END IF;
+END $$;
+
+DO $$
+DECLARE c TEXT;
+BEGIN
+    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'patient_credit_ledger'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%booking_deposit%' LOOP
+        EXECUTE format('ALTER TABLE patient_credit_ledger DROP CONSTRAINT %I', c);
+    END LOOP;
+END $$;
+ALTER TABLE patient_credit_ledger ADD CONSTRAINT ck_credit_kind CHECK (kind IN (
+    'unban_deposit', 'booking_deposit', 'booking_cancel_credit', 'refund_credit', 'applied_to_payment', 'refunded_out',
+    'booking_rebook', 'left_before_entry'));
+
+-- ---------------------------------------------------------------- الصلاحية
+INSERT INTO role_permissions (role_code, permission) VALUES ('branch_manager', 'support.manage')
+ON CONFLICT (role_code, permission) DO NOTHING;
+
+
+-- =============================================================================
+-- ترحيل 022: فوترة الصيدلية وسجل الصرف (التدقيق 6.2، 6.3-ب، 9.3-ب، خطة المالك المعتمدة)
+-- =============================================================================
+
+ALTER TABLE services ADD COLUMN IF NOT EXISTS requires_prescription BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE prescription_lines ADD COLUMN IF NOT EXISTS service_id UUID REFERENCES services(service_id);
+ALTER TABLE prescription_lines ADD COLUMN IF NOT EXISTS quantity SMALLINT;
+ALTER TABLE prescription_lines ADD COLUMN IF NOT EXISTS unit_price BIGINT;
+ALTER TABLE prescription_lines ADD COLUMN IF NOT EXISTS invoice_item_id UUID REFERENCES invoice_items(invoice_item_id);
+
+CREATE TABLE IF NOT EXISTS pharmacy_dispense_lines (
+    dispense_line_id      UUID PRIMARY KEY,
+    branch_id             UUID NOT NULL REFERENCES branches(branch_id),
+    patient_id            UUID NOT NULL REFERENCES patients(patient_id),
+    prescription_id       UUID REFERENCES prescriptions(prescription_id),
+    line_no               SMALLINT,
+    invoice_id            UUID REFERENCES invoices(invoice_id),
+    invoice_item_id       UUID REFERENCES invoice_items(invoice_item_id),
+    service_id            UUID REFERENCES services(service_id),
+    drug_name             VARCHAR(200) NOT NULL,
+    quantity              SMALLINT NOT NULL DEFAULT 0 CHECK (quantity >= 0),
+    unit_price            BIGINT NOT NULL DEFAULT 0 CHECK (unit_price >= 0),
+    amount                BIGINT NOT NULL DEFAULT 0 CHECK (amount >= 0),
+    -- billed: بانتظار الدفع والتسليم، dispensed: سُلِّم، not_available: غير متوفر، not_wanted: لم يرده المراجع
+    status                VARCHAR(15) NOT NULL CHECK (status IN ('billed', 'dispensed', 'not_available', 'not_wanted')),
+    is_external           BOOLEAN NOT NULL DEFAULT FALSE,
+    doctor_id             UUID REFERENCES doctors(doctor_id),
+    referring_doctor_name VARCHAR(150),
+    prescription_file_id  UUID REFERENCES files(file_id),
+    note                  TEXT,
+    reason                TEXT,
+    created_by            UUID REFERENCES users(user_id),
+    created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
+    dispensed_by          UUID REFERENCES users(user_id),
+    dispensed_at          TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_pharmacy_lines_branch ON pharmacy_dispense_lines(branch_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_pharmacy_lines_rx ON pharmacy_dispense_lines(prescription_id) WHERE prescription_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_pharmacy_lines_invoice ON pharmacy_dispense_lines(invoice_id);
+
+INSERT INTO role_permissions (role_code, permission) VALUES ('pharmacist', 'payments.collect')
+ON CONFLICT (role_code, permission) DO NOTHING;
+
+
+-- =============================================================================
+-- ترحيل 023: الدينار والدولار (التدقيق 7.2، خطة المالك المعتمدة)
+-- =============================================================================
+
+ALTER TABLE services ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'IQD';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_services_currency') THEN
+        ALTER TABLE services ADD CONSTRAINT ck_services_currency CHECK (currency IN ('IQD', 'USD'));
+    END IF;
+END $$;
+
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'IQD';
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS original_unit_price BIGINT;
+ALTER TABLE invoice_items ADD COLUMN IF NOT EXISTS exchange_rate INTEGER;
+
+CREATE TABLE IF NOT EXISTS exchange_rates (
+    branch_id       UUID NOT NULL REFERENCES branches(branch_id),
+    rate_date       DATE NOT NULL,
+    usd_to_iqd      INTEGER NOT NULL CHECK (usd_to_iqd BETWEEN 100 AND 10000),
+    set_by          UUID REFERENCES users(user_id),
+    set_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (branch_id, rate_date)
+);
+
+ALTER TABLE payment_tenders ADD COLUMN IF NOT EXISTS currency VARCHAR(3) NOT NULL DEFAULT 'IQD';
+ALTER TABLE payment_tenders ADD COLUMN IF NOT EXISTS original_amount BIGINT;
+ALTER TABLE payment_tenders ADD COLUMN IF NOT EXISTS exchange_rate INTEGER;
+DO $$
+DECLARE c TEXT;
+BEGIN
+    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'payment_tenders'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%''online''%' AND pg_get_constraintdef(oid) NOT LIKE '%pos_reference%' LOOP
+        EXECUTE format('ALTER TABLE payment_tenders DROP CONSTRAINT %I', c);
+    END LOOP;
+END $$;
+ALTER TABLE payment_tenders ADD CONSTRAINT ck_tenders_method CHECK (method IN ('cash', 'pos', 'online', 'cash_usd'));
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_tenders_usd') THEN
+        ALTER TABLE payment_tenders ADD CONSTRAINT ck_tenders_usd
+            CHECK ((method = 'cash_usd') = (currency = 'USD') AND (currency = 'IQD' OR (original_amount > 0 AND exchange_rate > 0)));
+    END IF;
+END $$;
+
+ALTER TABLE payments ADD COLUMN IF NOT EXISTS change_iqd BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE refunds ADD COLUMN IF NOT EXISTS original_amount BIGINT;
+DO $$
+DECLARE c TEXT;
+BEGIN
+    FOR c IN SELECT conname FROM pg_constraint WHERE conrelid = 'refunds'::regclass AND contype = 'c'
+              AND pg_get_constraintdef(oid) LIKE '%patient_credit%' LOOP
+        EXECUTE format('ALTER TABLE refunds DROP CONSTRAINT %I', c);
+    END LOOP;
+END $$;
+ALTER TABLE refunds ADD CONSTRAINT ck_refunds_method CHECK (method IN ('cash', 'pos', 'online_reversal', 'patient_credit', 'cash_usd'));
+
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS declared_usd BIGINT;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS expected_usd BIGINT;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS variance_usd BIGINT;
+

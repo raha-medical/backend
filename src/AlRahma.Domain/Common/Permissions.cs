@@ -66,6 +66,10 @@ public static class Permissions
     public const string SandboxView = "sandbox.view";
     public const string PatientsMerge = "patients.merge";
 
+    // ------------------------------------------------------------------ الدعم (الترحيل 021)
+    /// <summary>الأسئلة الشائعة وطلبات الدعم والرد عليها.</summary>
+    public const string SupportManage = "support.manage";
+
     /// <summary>الرموز الأصلية السبعة عشر (قبل الترحيل 009).</summary>
     public static readonly IReadOnlyList<string> Legacy =
     [
@@ -181,6 +185,9 @@ public static class Permissions
         new("notifications", "إشعارات الفرع", [
             new(NotificationsBranchView, "view", "عرض إشعارات الفرع", "إشعارات الموظفين التشغيلية في فرعه الحالي"),
         ]),
+        new("support", "الدعم", [
+            new(SupportManage, "all", "الدعم والأسئلة الشائعة", "إدارة الأسئلة الشائعة، واستقبال طلبات الدعم والشكاوى من تطبيق المراجع والرد عليها"),
+        ]),
         new("backups", "النسخ الاحتياطي", [
             new(BackupsView, "view", "عرض حالة النسخ الاحتياطي", "ملخص حالة نسخ السيرفر، قراءة فقط. الإدارة للمدير العام"),
             new(BackupsManage, "all", "إدارة النسخ الاحتياطي", "شاشة النسخ وسجل التشغيل والتشغيل اليدوي، للمدير العام فقط"),
@@ -211,14 +218,14 @@ public static class Permissions
         [
             UsersManage, ServicesManage, PatientsWrite, PatientsUnban, QueueManage, DiscountsGrant,
             RefundsApprove, ShiftsReview, DeferralsGrant, ReportsFinance, ExpensesManage, RolesView, BranchesView,
-            LabView, RadiologyView, PharmacyView, AuditRead, NotificationsBranchView, BackupsView, PatientsMerge
+            LabView, RadiologyView, PharmacyView, AuditRead, NotificationsBranchView, BackupsView, PatientsMerge, SupportManage
         ],
         [Roles.Doctor] = [ClinicalWrite, QueueManage, DeferralsGrant],
         [Roles.Receptionist] = [QueueManage, PaymentsCollect, PatientsWrite],
         [Roles.Accountant] = [ShiftsReview, RefundsApprove, ReportsFinance, PatientsUnban, PaymentsCollect, AuditRead, ExpensesManage],
         [Roles.LabTech] = [LabWrite],
         [Roles.Radiologist] = [RadiologyWrite],
-        [Roles.Pharmacist] = [PharmacyDispense],
+        [Roles.Pharmacist] = [PharmacyDispense, PaymentsCollect],
     };
 
     public static readonly IReadOnlyDictionary<string, string> RoleNamesAr = new Dictionary<string, string>
@@ -287,7 +294,7 @@ public static class NavSections
         if (Any(Permissions.ShiftsReview, Permissions.RefundsApprove, Permissions.ReportsFinance, Permissions.AuditRead, Permissions.ExpensesManage))
             list.Add(Accountant);
         if (Any(Permissions.UsersView, Permissions.RolesView, Permissions.BranchesView, Permissions.BranchesEdit, Permissions.ServicesView,
-                Permissions.ServicesManage, Permissions.DevicesView, Permissions.PatientsMerge))
+                Permissions.ServicesManage, Permissions.DevicesView, Permissions.PatientsMerge, Permissions.SupportManage))
             list.Add(Admin);
         return [.. list];
     }

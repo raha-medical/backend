@@ -8,14 +8,22 @@ namespace AlRahma.Application.Services;
 
 public record ServiceDto(
     Guid ServiceId, string Name, string Type, string? VisitKind, string? Modality,
-    Guid? ClinicId, long Price, bool IsCommissionable, bool IsActive, DateTimeOffset UpdatedAt);
+    Guid? ClinicId, long Price, bool IsCommissionable, bool IsActive, DateTimeOffset UpdatedAt)
+{
+    /// <summary>IQD | USD (الترحيل 023). سعر خدمة USD بالدولار.</summary>
+    public string Currency { get; init; } = "IQD";
+    /// <summary>دواء يحتاج وصفة (الترحيل 022).</summary>
+    public bool RequiresPrescription { get; init; }
+}
 
+/// <summary>currency: IQD (افتراضي) | USD (السعر بالدولار، لغير الكشفيات). requires_prescription للأدوية.</summary>
 public record CreateServiceRequest(
     string? Name, string? Type, string? VisitKind, string? Modality,
-    Guid? ClinicId, long? Price, bool? IsCommissionable);
+    Guid? ClinicId, long? Price, bool? IsCommissionable, string? Currency = null, bool? RequiresPrescription = null);
 
 /// <summary>PATCH: النوع ونوع الكشفية لا يتغيران بعد الإنشاء (أنشئ خدمة جديدة بدلاً من ذلك).</summary>
-public record UpdateServiceRequest(string? Name, Guid? ClinicId, long? Price, bool? IsCommissionable, bool? IsActive, string? Reason);
+public record UpdateServiceRequest(string? Name, Guid? ClinicId, long? Price, bool? IsCommissionable, bool? IsActive, string? Reason,
+    string? Currency = null, bool? RequiresPrescription = null);
 
 public record ServiceListQuery(string? Type, Guid? ClinicId, string? Q, bool IncludeInactive);
 
@@ -51,7 +59,9 @@ public class ServiceCatalog(IAppDbContext db, ICurrentUser current, IAuditLogger
             .Check(req.Modality is null || (type == ServiceTypes.Radiology && Modalities.All.Contains(req.Modality)),
                 "modality", "للأشعة فقط: xray أو ultrasound أو ct أو mri")
             .Check(type != ServiceTypes.Radiology || req.Modality is not null, "modality", "نوع الجهاز مطلوب لخدمات الأشعة")
-            .Check(type != ServiceTypes.Consultation || req.ClinicId is not null, "clinic_id", "العيادة مطلوبة للكشفية");
+            .Check(type != ServiceTypes.Consultation || req.ClinicId is not null, "clinic_id", "العيادة مطلوبة للكشفية")
+            .Check(req.Currency is null or "IQD" or "USD", "currency", "IQD | USD")
+            .Check(req.Currency != "USD" || type != ServiceTypes.Consultation, "currency", "الكشفيات بالدينار فقط");
         v.ThrowIfInvalid();
 
         if (req.ClinicId is { } clinicId) await EnsureClinicFitsAsync(clinicId, type, ct);
@@ -74,6 +84,8 @@ public class ServiceCatalog(IAppDbContext db, ICurrentUser current, IAuditLogger
             Modality = req.Modality,
             Price = req.Price!.Value,
             IsCommissionable = req.IsCommissionable ?? type is ServiceTypes.Consultation or ServiceTypes.Procedure,
+            Currency = req.Currency ?? "IQD",
+            RequiresPrescription = type == ServiceTypes.Pharmacy && req.RequiresPrescription == true,
             IsActive = true,
             CreatedAt = now,
             UpdatedAt = now,
@@ -103,6 +115,13 @@ public class ServiceCatalog(IAppDbContext db, ICurrentUser current, IAuditLogger
         if (req.ClinicId is not null) service.ClinicId = req.ClinicId;
         if (req.Price is { } price) service.Price = price;
         if (req.IsCommissionable is { } c) service.IsCommissionable = c;
+        if (req.Currency is not null)
+        {
+            new Validator().Check(req.Currency is "IQD" or "USD", "currency", "IQD | USD")
+                .Check(req.Currency == "IQD" || service.Type != ServiceTypes.Consultation, "currency", "الكشفيات بالدينار فقط").ThrowIfInvalid();
+            service.Currency = req.Currency;
+        }
+        if (req.RequiresPrescription is { } rx) service.RequiresPrescription = service.Type == ServiceTypes.Pharmacy && rx;
         if (req.IsActive is { } active)
         {
             if (active && !service.IsActive && service.Type == ServiceTypes.Consultation &&
@@ -143,5 +162,8 @@ public class ServiceCatalog(IAppDbContext db, ICurrentUser current, IAuditLogger
     }
 
     private static ServiceDto ToDto(Service s) => new(
-        s.ServiceId, s.Name, s.Type, s.VisitKind, s.Modality, s.ClinicId, s.Price, s.IsCommissionable, s.IsActive, s.UpdatedAt);
+        s.ServiceId, s.Name, s.Type, s.VisitKind, s.Modality, s.ClinicId, s.Price, s.IsCommissionable, s.IsActive, s.UpdatedAt)
+    {
+        Currency = s.Currency, RequiresPrescription = s.RequiresPrescription,
+    };
 }

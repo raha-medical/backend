@@ -41,6 +41,10 @@ public class Service
     public string? Modality { get; set; }
     public long Price { get; set; }
     public bool IsCommissionable { get; set; }
+    /// <summary>دواء يحتاج وصفة: لا يُصرف للمراجع الخارجي إلا بصورة الوصفة أو ملاحظة (الترحيل 022).</summary>
+    public bool RequiresPrescription { get; set; }
+    /// <summary>IQD | USD (الترحيل 023). سعر خدمة USD بالدولار.</summary>
+    public string Currency { get; set; } = "IQD";
     public bool IsActive { get; set; } = true;
     public DateTimeOffset CreatedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }

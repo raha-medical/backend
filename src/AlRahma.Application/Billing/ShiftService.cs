@@ -22,8 +22,16 @@ public record UnprintedReceiptDto(Guid ReceiptId, string ReceiptNumber, string T
 /// </summary>
 public record ShiftSummaryDto(long OpeningFloat, long CashReceived, long CashRefunds, long CashExpenses, long CashInHand,
     long ElectronicForMyCheckIns, int ElectronicCount, int RefundsCount, long RefundsTotal, int CheckedInCount, int UnpaidCount,
-    IReadOnlyList<UnprintedReceiptDto> UnprintedReceipts, bool FromPreviousDay);
-public record DeclaredInput(long? Cash, short? PosSlipsCount, long? PosTotal);
+    IReadOnlyList<UnprintedReceiptDto> UnprintedReceipts, bool FromPreviousDay)
+{
+    /// <summary>نقد الدولار مفصول (7.2): المستلم والمسترجع وما في الذمة بالدولار، والفكة المعادة بالدينار (مطروحة من cash_received).</summary>
+    public long UsdReceived { get; init; }
+    public long UsdRefunds { get; init; }
+    public long UsdInHand { get; init; }
+    public long ChangeGivenIqd { get; init; }
+}
+/// <summary>usd: الدولارات المعدودة (مطلوب إذا قُبض دولار في الحساب).</summary>
+public record DeclaredInput(long? Cash, short? PosSlipsCount, long? PosTotal, long? Usd = null);
 /// <summary>unprinted_reasons: سبب لكل وصل غير مطبوع { receipt_id: "السبب" } (أو أعد طباعته قبل الإغلاق).</summary>
 public record CloseShiftRequest(DeclaredInput? Declared, Dictionary<string, int>? CashDenominations, string? Note,
     Dictionary<Guid, string>? UnprintedReasons = null);
@@ -135,7 +143,9 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         shift.VarianceCash = (shift.DeclaredCash ?? 0) - totals.ExpectedCash;
         shift.VariancePos = (shift.DeclaredPosTotal ?? 0) - totals.ExpectedPos;
         var variance = shift.VarianceCash.Value + shift.VariancePos.Value;
-        shift.AuditStatus = variance == 0 ? "MATCHED" : variance < 0 ? "SHORTAGE" : "OVERAGE";
+        shift.ExpectedUsd = totals.ExpectedUsd;
+        shift.VarianceUsd = (shift.DeclaredUsd ?? 0) - totals.ExpectedUsd;
+        shift.AuditStatus = AuditStatusOf(variance, shift.VarianceUsd.Value);
         var reopened = shift.Status == ShiftStatuses.Reviewed;
         if (reopened)
         {
@@ -167,6 +177,7 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             .Check(d?.Cash is >= 0, "declared.cash", "أدخل النقد المعدود (صفر إن لم يوجد)")
             .Check(d?.PosTotal is null or >= 0, "declared.pos_total", "قيمة غير صالحة")
             .Check(d?.PosSlipsCount is null or >= 0, "declared.pos_slips_count", "قيمة غير صالحة")
+            .Check(d?.Usd is null or >= 0, "declared.usd", "قيمة غير صالحة")
             .Check(req.CashDenominations is null || req.CashDenominations.All(x => long.TryParse(x.Key, out var v) && v > 0 && x.Value >= 0),
                 "cash_denominations", "الفئة رقم موجب والعدد صفر أو أكثر")
             .Check(req.Note is null || req.Note.Length <= 1000, "note", "1000 حرف كحد أقصى")
@@ -194,6 +205,11 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             if (ReasonFor(r.ReceiptId) is { } why) r.UnprintedReason = why.Length > 500 ? why[..500] : why;
 
         var totals = await TotalsAsync(shift, ct);
+        if (totals.ExpectedUsd != 0 && d!.Usd is null)
+            throw AppException.Validation(new Dictionary<string, string[]> { ["declared.usd"] = ["قُبض دولار في هذا الحساب: أدخل الدولارات المعدودة (صفر إن لم يوجد)"] });
+        shift.DeclaredUsd = d!.Usd ?? 0;
+        shift.ExpectedUsd = totals.ExpectedUsd;
+        shift.VarianceUsd = shift.DeclaredUsd - totals.ExpectedUsd;
         shift.DeclaredCash = d!.Cash;
         shift.DeclaredPosTotal = d.PosTotal ?? 0;
         shift.DeclaredPosSlipsCount = d.PosSlipsCount;
@@ -205,13 +221,15 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         shift.VarianceCash = shift.DeclaredCash - totals.ExpectedCash;
         shift.VariancePos = shift.DeclaredPosTotal - totals.ExpectedPos;
         var variance = shift.VarianceCash.Value + shift.VariancePos.Value;
-        shift.AuditStatus = variance == 0 ? "MATCHED" : variance < 0 ? "SHORTAGE" : "OVERAGE";
+        // الدينار والدولار يُطابقان كلٌّ على حدة: فرق الدولار وحده يجعل الحساب عجزاً أو زيادة أيضاً
+        shift.AuditStatus = AuditStatusOf(variance, shift.VarianceUsd ?? 0);
         shift.Status = ShiftStatuses.ClosedPendingReview;
         shift.ClosedAt ??= clock.UtcNow;
         await RecordLiabilityAsync(shift, variance, ct);
         audit.Add(acknowledging ? "SHIFT_AUTO_CLOSE_ACKNOWLEDGED" : "SHIFT_CLOSED", "shift", shift.ShiftId, after: new
         {
             shift.DeclaredCash, shift.DeclaredPosTotal, shift.ExpectedCash, shift.ExpectedPos, shift.AuditStatus, variance,
+            shift.DeclaredUsd, shift.ExpectedUsd, shift.VarianceUsd,
             unprinted = unprinted.Select(r => new { r.ReceiptNumber, r.UnprintedReason }),
         }, reason: shift.CloseNote);
         await db.SaveChangesAsync(ct);
@@ -248,6 +266,10 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                 open ? null : shift.VariancePos ?? Variance(shift.DeclaredPosTotal, totals.ExpectedPos)),
             new("online", await ElectronicForCheckInsAsync(shift, ct), null, null),
         };
+        // نقد الدولار سطر مستقل بالدولار (7.2)
+        if (totals.UsdReceived > 0 || shift.DeclaredUsd is > 0)
+            lines.Add(new("cash_usd", open ? totals.ExpectedUsd : shift.ExpectedUsd ?? totals.ExpectedUsd, shift.DeclaredUsd,
+                open ? null : shift.VarianceUsd ?? Variance(shift.DeclaredUsd, totals.ExpectedUsd)));
         var denominations = shift.CashDenominations is null ? null : JsonSerializer.Deserialize<Dictionary<string, int>>(shift.CashDenominations);
         var point = shift.ClinicId is { } pid ? await db.Clinics.AsNoTracking().FirstOrDefaultAsync(c => c.ClinicId == pid, ct) : null;
         return new ReconciliationDto(shift.ShiftId, shift.UserId, cashier, shift.Status, shift.OpenedAt, shift.ClosedAt, shift.OpeningFloat, lines,
@@ -337,6 +359,7 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             var totals = await TotalsAsync(shift, ct);
             shift.ExpectedCash = totals.ExpectedCash;
             shift.ExpectedPos = totals.ExpectedPos;
+            shift.ExpectedUsd = totals.ExpectedUsd;
             shift.ExpectedOnline = 0;
             shift.Status = ShiftStatuses.ClosedPendingReview;
             shift.ClosedAt = clock.UtcNow;
@@ -437,7 +460,10 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             .FirstOrDefaultAsync(ct) ?? new { Sum = 0L, Count = 0 };
         return new ShiftSummaryDto(s.OpeningFloat, totals.CashReceived, totals.CashRefunds, totals.CashExpenses, totals.ExpectedCash,
             electronic.Sum, electronic.Count, refunds?.Count ?? 0, refunds?.Sum ?? 0, tickets.Count, await UnpaidCountAsync(s, ct),
-            await UnprintedAsync(s, ct), s.OpenedAt < ClockExtensions.ToUtc(clock.BaghdadToday(), TimeOnly.MinValue));
+            await UnprintedAsync(s, ct), s.OpenedAt < ClockExtensions.ToUtc(clock.BaghdadToday(), TimeOnly.MinValue))
+        {
+            UsdReceived = totals.UsdReceived, UsdRefunds = totals.UsdRefunds, UsdInHand = totals.ExpectedUsd, ChangeGivenIqd = totals.ChangeIqd,
+        };
     }
 
     private async Task<Shift> LoadForReviewAsync(Guid shiftId, CancellationToken ct)
@@ -448,11 +474,17 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
     }
 
     private record Totals(long CashReceived, long CashRefunds, long PosReceived, long PosRefunds, int PosSlips, long OpeningFloat, long CashExpenses,
-        int ExpensesCount)
+        int ExpensesCount, long UsdReceived = 0, long UsdRefunds = 0, long ChangeIqd = 0)
     {
         public long ExpectedCash => OpeningFloat + CashReceived - CashRefunds - CashExpenses;
         public long ExpectedPos => PosReceived - PosRefunds;
+        /// <summary>الدولارات التي يجب أن تكون في الدرج.</summary>
+        public long ExpectedUsd => UsdReceived - UsdRefunds;
     }
+
+    private static string AuditStatusOf(long iqdVariance, long usdVariance) =>
+        iqdVariance == 0 && usdVariance == 0 ? "MATCHED"
+        : iqdVariance < 0 || (iqdVariance == 0 && usdVariance < 0) ? "SHORTAGE" : "OVERAGE";
 
     /// <summary>ما يجب أن يكون في الدرج: الفكة + النقد المقبوض − النقد المسترجع − المصاريف من الدرج. وفي POS: المقبوض − المسترجع.</summary>
     private async Task<Totals> TotalsAsync(Shift shift, CancellationToken ct)
@@ -465,8 +497,15 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         long R(string m) => refunds.FirstOrDefault(x => x.Method == m)?.Sum ?? 0;
         var expenses = await db.Expenses.Where(x => x.ShiftId == shift.ShiftId && x.Status == ExpenseStatuses.Recorded)
             .GroupBy(x => 1).Select(g => new { Sum = g.Sum(x => x.Amount), Count = g.Count() }).FirstOrDefaultAsync(ct);
-        return new Totals(T(TenderMethods.Cash), R(RefundMethods.Cash), T(TenderMethods.Pos), R(RefundMethods.Pos),
-            tenders.FirstOrDefault(x => x.Method == TenderMethods.Pos)?.Count ?? 0, shift.OpeningFloat, expenses?.Sum ?? 0, expenses?.Count ?? 0);
+        // 7.2: نقد الدولار مفصول عن الدينار، والفكة المعادة بالدينار تُطرح من نقد الدينار المستلم
+        var change = await db.Payments.Where(p => p.ShiftId == shift.ShiftId).SumAsync(p => (long?)p.ChangeIqd, ct) ?? 0;
+        var usdIn = await db.Payments.Where(p => p.ShiftId == shift.ShiftId).SelectMany(p => p.Tenders)
+            .Where(t => t.Method == TenderMethods.CashUsd).SumAsync(t => (long?)t.OriginalAmount, ct) ?? 0;
+        var usdOut = await db.Refunds.Where(r => r.ShiftId == shift.ShiftId && r.Status == RefundStatuses.Completed && r.Method == RefundMethods.CashUsd)
+            .SumAsync(r => (long?)r.OriginalAmount, ct) ?? 0;
+        return new Totals(T(TenderMethods.Cash) - change, R(RefundMethods.Cash), T(TenderMethods.Pos), R(RefundMethods.Pos),
+            tenders.FirstOrDefault(x => x.Method == TenderMethods.Pos)?.Count ?? 0, shift.OpeningFloat, expenses?.Sum ?? 0, expenses?.Count ?? 0,
+            usdIn, usdOut, change);
     }
 
     private async Task<ShiftDto> ToDtoAsync(Shift s, CancellationToken ct)

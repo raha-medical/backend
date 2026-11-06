@@ -13,6 +13,7 @@ public static class ArabicFormat
     private static readonly IReadOnlyDictionary<string, string> Methods = new Dictionary<string, string>
     {
         ["cash"] = "نقدي", ["pos"] = "بطاقة", ["online"] = "دفع إلكتروني", ["patient_credit"] = "رصيد المريض", ["online_reversal"] = "إرجاع إلكتروني",
+        ["cash_usd"] = "نقدي بالدولار",
     };
 
     public static DateTimeOffset Local(DateTimeOffset t) => t.ToOffset(ClockExtensions.BaghdadOffset);

@@ -11,10 +11,16 @@ public record BillableItemDto(Guid InvoiceItemId, Guid InvoiceId, string Invoice
     string? OrderedBy, DateTimeOffset OrderedAt, short Quantity, long Price, string Status, bool IsCurrentDepartment);
 public record BillableItemsDto(Guid PatientId, long DepositCredit, IReadOnlyList<BillableItemDto> Items, long TotalDue);
 
+/// <summary>method: cash | pos | cash_usd. لـ cash_usd يكون amount بالدولار (عدد صحيح)، ويُحسب المقابل بسعر صرف اليوم، والفكة بالدينار.</summary>
 public record TenderInput(string? Method, long? Amount, string? PosTerminal, string? PosReference);
 public record CollectPaymentRequest(Guid? PaymentId, Guid? PatientId, List<Guid>? InvoiceItemIds, long? UseDepositCredit,
     List<TenderInput>? Tenders, string? OfflineReceiptNumber, DateTimeOffset? CreatedOfflineAt);
-public record PaymentResponse(Guid PaymentId, Guid ShiftId, long TotalPaid, long DepositUsed, ReceiptRefDto Receipt, string? DrawerToken, bool OpenDrawer);
+public record PaymentResponse(Guid PaymentId, Guid ShiftId, long TotalPaid, long DepositUsed, ReceiptRefDto Receipt, string? DrawerToken, bool OpenDrawer)
+{
+    /// <summary>الدفع بالدولار: الفكة المعادة بالدينار، وسعر الصرف المستخدم.</summary>
+    public long ChangeIqd { get; init; }
+    public int? ExchangeRate { get; init; }
+}
 /// <summary>تحصيل تم أوفلاين ووصل عبر /sync/batch: برقم إيصال من كتلة الجهاز ووقت حدوثه.</summary>
 /// <summary>`ShiftId`: الوردية التي كانت مفتوحة على الجهاز وقت التحصيل (C3)؛ بدونها تُستخدم وردية من يزامن (السلوك السابق).</summary>
 public record OfflineContext(Guid DeviceId, DateTimeOffset OccurredAt, Guid? TicketId, Guid? ShiftId = null);
@@ -26,7 +32,7 @@ public record DepositResult(Receipt Receipt, string? DrawerToken, bool OpenDrawe
 /// </summary>
 public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, FinanceCore finance,
     IDrawerTokenIssuer drawer, QueueNotifier notifier,
-    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications, SettingsReader settings)
+    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications, SettingsReader settings, CurrencyService currency)
 {
     public async Task<BillableItemsDto> BillableItemsAsync(Guid patientId, string? department, CancellationToken ct)
     {
@@ -72,7 +78,8 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
             .Check(req.PatientId is not null, "patient_id", "المريض مطلوب")
             .Check(ids.Count > 0, "invoice_item_ids", "اختر بنداً واحداً على الأقل")
             .Check(req.UseDepositCredit is null or >= 0, "use_deposit_credit", "قيمة غير صالحة")
-            .Check(tenders.All(t => t.Method is TenderMethods.Cash or TenderMethods.Pos), "tenders", "طريقة الدفع cash أو pos")
+            .Check(tenders.All(t => t.Method is TenderMethods.Cash or TenderMethods.Pos or TenderMethods.CashUsd), "tenders", "طريقة الدفع cash أو pos أو cash_usd")
+            .Check(offline is null || tenders.All(t => t.Method != TenderMethods.CashUsd), "tenders", "الدفع بالدولار غير متاح أوفلاين")
             .Check(tenders.All(t => t.Amount is > 0), "tenders", "كل مبلغ أكبر من صفر")
             .Check(tenders.All(t => t.Method != TenderMethods.Pos || !string.IsNullOrWhiteSpace(t.PosReference)), "tenders", "رقم عملية POS مطلوب")
             .ThrowIfInvalid();
@@ -84,6 +91,8 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
         var paymentId = req.PaymentId ?? UuidV7.New();
         if (await db.Payments.AnyAsync(p => p.PaymentId == paymentId, ct))
             throw new AppException(409, "PAYMENT_EXISTS", "يوجد دفعة بنفس المعرف");
+        // 7.2: الدولار بسعر اليوم فقط، ويُرفض قبل إدخال سعر اليوم
+        var usdRate = tenders.Any(t => t.Method == TenderMethods.CashUsd) ? await currency.RequireTodayRateAsync(current.BranchId, ct) : (int?)null;
         var patient = await LoadPatientAsync(req.PatientId!.Value, ct);
         var offlineShift = offline?.ShiftId is not null;
         var shift = offline?.ShiftId is { } sid ? await finance.OfflineShiftAsync(sid, offline.DeviceId, ct) : await finance.RequireOpenShiftAsync(ct);
@@ -128,12 +137,36 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
         if (deposit > balance || deposit > due)
             throw new AppException(422, "INSUFFICIENT_CREDIT", "الرصيد المستخدم أكبر من رصيد المريض أو من المستحق")
                 { Extensions = new Dictionary<string, object?> { ["credit_balance"] = balance, ["total_due"] = due } };
-        var paid = tenders.Sum(t => t.Amount!.Value);
-        // الأوفلاين بسعر قديم مخزن محلياً: المال قُبض فعلاً، فيُقبل ويُعلَّم للمحاسب بدل الرفض
-        var mismatch = paid != due - deposit;
-        if (mismatch && offline is null)
-            throw new AppException(422, "AMOUNT_MISMATCH", "المبلغ المدفوع لا يساوي المستحق")
-                { Extensions = new Dictionary<string, object?> { ["expected_amount"] = due - deposit, ["total_due"] = due, ["deposit_used"] = deposit } };
+        var iqdTendered = tenders.Where(t => t.Method != TenderMethods.CashUsd).Sum(t => t.Amount!.Value);
+        var usdEquivalent = usdRate is { } rate0 ? tenders.Where(t => t.Method == TenderMethods.CashUsd).Sum(t => t.Amount!.Value * rate0) : 0;
+        long change = 0;
+        long paid;
+        bool mismatch;
+        if (usdRate is null)
+        {
+            paid = iqdTendered;
+            // الأوفلاين بسعر قديم مخزن محلياً: المال قُبض فعلاً، فيُقبل ويُعلَّم للمحاسب بدل الرفض
+            mismatch = paid != due - deposit;
+            if (mismatch && offline is null)
+                throw new AppException(422, "AMOUNT_MISMATCH", "المبلغ المدفوع لا يساوي المستحق")
+                    { Extensions = new Dictionary<string, object?> { ["expected_amount"] = due - deposit, ["total_due"] = due, ["deposit_used"] = deposit } };
+        }
+        else
+        {
+            // الدفع بالدولار: المقابل بالدينار يغطي المستحق، والزائد يُعاد فكةً بالدينار دائماً (لا يتجاوز جزء الدولار)
+            var expected = due - deposit;
+            change = iqdTendered + usdEquivalent - expected;
+            if (change < 0 || iqdTendered > expected || change >= usdEquivalent)
+                throw new AppException(422, "AMOUNT_MISMATCH", "المبلغ المدفوع لا يغطي المستحق أو يزيد عن الحاجة")
+                {
+                    Extensions = new Dictionary<string, object?>
+                    {
+                        ["expected_amount"] = expected, ["exchange_rate"] = usdRate, ["usd_equivalent"] = usdEquivalent, ["iqd_tendered"] = iqdTendered,
+                    },
+                };
+            paid = expected;
+            mismatch = false;
+        }
 
         var now = clock.UtcNow;
         var receipt = offline is null
@@ -150,14 +183,29 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
             TotalPaid = paid,
             DepositUsed = deposit,
             PriceMismatch = mismatch,
+            ChangeIqd = change,
             CreatedBy = offlineShift ? shift.UserId : current.UserId, // باسم صاحب الوردية لا من زامن
             CreatedOfflineAt = offline?.OccurredAt,
             CreatedAt = now,
         };
-        payment.Tenders.AddRange(tenders.Select(t => new PaymentTender
+        var changeLeft = change;
+        payment.Tenders.AddRange(tenders.Select(t =>
         {
-            TenderId = UuidV7.New(), PaymentId = paymentId, Method = t.Method!, Amount = t.Amount!.Value,
-            PosTerminal = t.PosTerminal?.Trim(), PosReference = t.PosReference?.Trim(),
+            if (t.Method != TenderMethods.CashUsd)
+                return new PaymentTender
+                {
+                    TenderId = UuidV7.New(), PaymentId = paymentId, Method = t.Method!, Amount = t.Amount!.Value,
+                    PosTerminal = t.PosTerminal?.Trim(), PosReference = t.PosReference?.Trim(),
+                };
+            // amount = المقابل المطبَّق بالدينار (بعد الفكة)، و original_amount = الدولارات المستلمة
+            var eq = t.Amount!.Value * usdRate!.Value;
+            var take = Math.Min(changeLeft, eq - 1);
+            changeLeft -= take;
+            return new PaymentTender
+            {
+                TenderId = UuidV7.New(), PaymentId = paymentId, Method = TenderMethods.CashUsd, Amount = eq - take, Currency = CurrencyService.Usd,
+                OriginalAmount = t.Amount.Value, ExchangeRate = usdRate,
+            };
         }));
         payment.Allocations.AddRange(items.Select(i => new PaymentAllocation { PaymentId = paymentId, InvoiceItemId = i.InvoiceItemId, Amount = i.NetPrice }));
         db.Payments.Add(payment);
@@ -175,7 +223,7 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
             receipt.ReceiptNumber, patient_id = patient.PatientId, total_paid = paid, deposit_used = deposit,
             items = items.Select(i => new { i.InvoiceItemId, i.NetPrice }),
             tenders = tenders.Select(t => new { t.Method, t.Amount }),
-            offline = offline is not null, price_mismatch = mismatch,
+            offline = offline is not null, price_mismatch = mismatch, change_iqd = change, exchange_rate = usdRate,
         });
         await db.SaveChangesAsync(ct);
         if (settlesDeferral) await DeferralService.SettlePaidAsync(db, idArray, now, ct);
@@ -199,9 +247,12 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
             }
         }
 
-        var cash = tenders.Where(t => t.Method == TenderMethods.Cash).Sum(t => t.Amount!.Value);
+        var cash = tenders.Where(t => t.Method is TenderMethods.Cash or TenderMethods.CashUsd).Sum(t => t.Amount!.Value);
         return new PaymentResponse(paymentId, shift.ShiftId, paid, deposit, finance.Ref(receipt),
-            cash > 0 && drawer.Enabled ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash > 0 && drawer.Enabled);
+            cash > 0 && drawer.Enabled ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null, cash > 0 && drawer.Enabled)
+        {
+            ChangeIqd = change, ExchangeRate = usdRate,
+        };
     }
 
     /// <summary>قبض عربون (فك الحظر): دفعة بلا بنود تدخل الدرج، وتضيف المبلغ لرصيد المريض، ويصدر إيصال "عربون".</summary>

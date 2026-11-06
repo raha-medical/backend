@@ -237,3 +237,33 @@ public static class BackupStatuses
     public const string Succeeded = "succeeded";
     public const string Failed = "failed";
 }
+
+/// <summary>سؤال شائع في تطبيق المراجع (الترحيل 021). category: booking | cancel | payment | refund | hours | app | other.</summary>
+public class FaqItem
+{
+    public Guid FaqId { get; set; }
+    public string Category { get; set; } = "other";
+    public string QuestionAr { get; set; } = "";
+    public string AnswerAr { get; set; } = "";
+    public int Sort { get; set; }
+    public bool IsActive { get; set; } = true;
+    public DateTimeOffset CreatedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+/// <summary>طلب دعم أو شكوى من المراجع (الترحيل 021). type: booking | payment | refund | app | other. status: open | replied.</summary>
+public class SupportRequest
+{
+    public Guid SupportRequestId { get; set; }
+    public Guid PatientAccountId { get; set; }
+    public Guid? PatientId { get; set; }
+    public Guid? BookingId { get; set; }
+    public Guid? BranchId { get; set; }
+    public string Type { get; set; } = "other";
+    public string Description { get; set; } = "";
+    public string Status { get; set; } = "open";
+    public string? Reply { get; set; }
+    public Guid? RepliedBy { get; set; }
+    public DateTimeOffset? RepliedAt { get; set; }
+    public DateTimeOffset CreatedAt { get; set; }
+}

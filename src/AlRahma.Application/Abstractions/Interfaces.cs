@@ -67,6 +67,10 @@ public interface IAppDbContext
     DbSet<OnlinePayment> OnlinePayments { get; }
     DbSet<MockGatewayTransaction> MockGatewayTransactions { get; }
     DbSet<StaffLiability> StaffLiabilities { get; }
+    DbSet<FaqItem> FaqItems { get; }
+    DbSet<SupportRequest> SupportRequests { get; }
+    DbSet<PharmacyDispenseLine> PharmacyDispenseLines { get; }
+    DbSet<ExchangeRate> ExchangeRates { get; }
     DbSet<ReceiptBlock> ReceiptBlocks { get; }
     DbSet<SyncOperation> SyncOperations { get; }
     DbSet<AgentEvent> AgentEvents { get; }

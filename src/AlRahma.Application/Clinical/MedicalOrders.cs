@@ -7,9 +7,21 @@ using Microsoft.EntityFrameworkCore;
 namespace AlRahma.Application.Clinical;
 
 public record OrderLineInput(Guid? ServiceId, string? Note);
-public record DirectOrderRequest(Guid? PatientId, List<OrderLineInput>? Items, string? ReferringDoctorName);
+/// <summary>ملف مراجع خارجي مختصر (6.3): الاسم والهاتف فقط. يُعاد استخدام الملف الموجود بنفس الاسم والهاتف.</summary>
+public record ExternalPatientInput(string? FullName, string? PhoneNumber);
+/// <summary>patient_id لمراجع له ملف، أو new_patient (الاسم والهاتف) لمراجع خارجي جديد.</summary>
+public record DirectOrderRequest(Guid? PatientId, List<OrderLineInput>? Items, string? ReferringDoctorName, ExternalPatientInput? NewPatient = null);
 public record DirectOrderItemDto(Guid OrderItemId, string Department, string ServiceName, Guid InvoiceItemId, long Price, string Status);
-public record DirectOrderResponse(IReadOnlyList<DirectOrderItemDto> Items);
+public record DirectOrderResponse(IReadOnlyList<DirectOrderItemDto> Items)
+{
+    public Guid PatientId { get; init; }
+    public string? FileNumber { get; init; }
+    public string? PatientName { get; init; }
+    public Guid? InvoiceId { get; init; }
+    public long TotalDue { get; init; }
+    /// <summary>أُنشئ ملف مختصر جديد للمراجع الخارجي.</summary>
+    public bool PatientCreated { get; init; }
+}
 public record CancelOrderRequest(string? Reason);
 public record CancelOrderResponse(Guid OrderItemId, string Status);
 
@@ -49,7 +61,8 @@ public class MedicalOrderSync(IAppDbContext db, IRealtime realtime, ReferralTrac
 }
 
 /// <summary>إنشاء الطلبات الطبية مع بنودها في سلة المريض (فاتورة جديدة بسعر الخدمة من السيرفر).</summary>
-public class OrderBilling(IAppDbContext db, ICurrentUser current, IClock clock, NumberSequences numbers, ReferralTracker referrals)
+public class OrderBilling(IAppDbContext db, ICurrentUser current, IClock clock, NumberSequences numbers, ReferralTracker referrals,
+    Billing.CurrencyService currency)
 {
     public record Line(Service Service, string? Note);
 
@@ -102,14 +115,17 @@ public class OrderBilling(IAppDbContext db, ICurrentUser current, IClock clock, 
         foreach (var l in lines)
         {
             var r = l.Service.IsCommissionable && doctorId is not null ? rate : 0m;
-            var share = (long)Math.Round(l.Service.Price * r / 100m, MidpointRounding.AwayFromZero);
-            var free = l.Service.Price == 0;
+            // 7.2: خدمة بالدولار تتحول بسعر اليوم (والسعر الأصلي يبقى على البند)
+            var price = await currency.PriceAsync(l.Service, branchId, ct);
+            var share = (long)Math.Round(price.UnitPriceIqd * r / 100m, MidpointRounding.AwayFromZero);
+            var free = price.UnitPriceIqd == 0;
             var item = new InvoiceItem
             {
                 InvoiceItemId = UuidV7.New(), InvoiceId = invoice.InvoiceId, ServiceId = l.Service.ServiceId, DoctorId = doctorId,
-                ItemType = l.Service.Type, ServiceName = l.Service.Name, Quantity = 1, UnitPrice = l.Service.Price, NetPrice = l.Service.Price,
-                CommissionRate = r, DoctorShare = share, ComplexShare = l.Service.Price - share,
+                ItemType = l.Service.Type, ServiceName = l.Service.Name, Quantity = 1, UnitPrice = price.UnitPriceIqd, NetPrice = price.UnitPriceIqd,
+                CommissionRate = r, DoctorShare = share, ComplexShare = price.UnitPriceIqd - share,
                 Status = free ? InvoiceItemStatuses.Paid : InvoiceItemStatuses.Unpaid, CreatedAt = now,
+                Currency = price.Currency, OriginalUnitPrice = price.OriginalUnitPrice, ExchangeRate = price.Rate,
             };
             invoice.Items.Add(item);
             var order = new MedicalOrder

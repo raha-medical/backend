@@ -55,6 +55,9 @@ public static class DependencyInjection
         services.AddScoped<DeviceService>();
         services.AddScoped<FinanceCore>();
         services.AddScoped<ShiftService>();
+        services.AddScoped<Support.SupportService>();
+        services.AddScoped<DoctorCancelOptionsService>();
+        services.AddScoped<CurrencyService>();
         services.AddScoped<PaymentService>();
         services.AddScoped<ReceiptService>();
         services.AddScoped<InvoiceService>();
@@ -84,6 +87,7 @@ public static class DependencyInjection
         services.AddScoped<Clinical.LabService>();
         services.AddScoped<Clinical.RadiologyService>();
         services.AddScoped<Clinical.PharmacyService>();
+        services.AddScoped<Clinical.PharmacyBillingService>();
         services.AddScoped<Offline.SyncService>();
         return services;
     }

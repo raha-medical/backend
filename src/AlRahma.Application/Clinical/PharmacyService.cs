@@ -9,7 +9,16 @@ namespace AlRahma.Application.Clinical;
 public record DispenseLineInput(short? LineNo, bool? Dispensed, string? SubstituteDrugName, string? NotDispensedReason);
 public record DispenseRequest(List<DispenseLineInput>? Lines);
 public record PrescriptionItemDto(short LineNo, string DrugName, string? Dose, string? Frequency, short? DurationDays, string? Instructions,
-    bool? Dispensed, string? SubstituteDrugName, string? NotDispensedReason);
+    bool? Dispensed, string? SubstituteDrugName, string? NotDispensedReason)
+{
+    /// <summary>بعد التسعير (الترحيل 022): الدواء من القائمة والكمية والسعر وبند الفاتورة وحالة دفعه.</summary>
+    public Guid? ServiceId { get; init; }
+    public short? Quantity { get; init; }
+    public long? UnitPrice { get; init; }
+    public Guid? InvoiceItemId { get; init; }
+    public string? PaymentStatus { get; init; }
+}
+public record DispensedQuery(DateOnly? Date, DateOnly? From, DateOnly? To, Guid? DoctorId, Guid? UserId, string? Drug);
 public record PrescriptionDto(Guid PrescriptionId, string PrescriptionCode, string PatientName, string? FileNumber, string? Gender, int? Age,
     string DoctorName, string ClinicName, string BranchName, string? Diagnosis, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt, string Status,
     DateTimeOffset? DispensedAt, string? DispensedBy, IReadOnlyList<PrescriptionItemDto> Items)
@@ -23,7 +32,8 @@ public record PrescriptionDto(Guid PrescriptionId, string PrescriptionCode, stri
 /// <summary>
 /// الصيدلية (المرحلة الأولى): صرف الوصفة إلكترونياً مرة واحدة في أي فرع حتى انتهاء صلاحيتها، مع توثيق ما صُرف وما لم يُصرف وسببه.
 /// </summary>
-public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, PatientPortalService portal, ReferralTracker referrals)
+public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, PatientPortalService portal, ReferralTracker referrals,
+    PharmacyBillingService billing)
 {
     public async Task<PrescriptionDto> GetByCodeAsync(string code, CancellationToken ct)
     {
@@ -61,6 +71,10 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
             v.Check(l.SubstituteDrugName is null || l.SubstituteDrugName.Length <= 200, $"lines[{i}].substitute_drug_name", "200 حرف كحد أقصى");
         }
         v.ThrowIfInvalid();
+        // خطة المالك: التسليم بعد الدفع. كل سطر يُصرف مسعّر وبنده مدفوع
+        var dispensedLines = input.Where(l => l.Dispensed == true).Select(l => l.LineNo!.Value).ToList();
+        var billedRows = await billing.EnsurePaidForDispenseAsync(rx, dispensedLines, ct);
+        billing.MarkDispensed(billedRows, dispensedLines, input.Where(l => l.Dispensed == false).ToDictionary(l => l.LineNo!.Value, l => l.NotDispensedReason), now);
         foreach (var l in input)
         {
             var line = rx.Lines.First(x => x.LineNo == l.LineNo);
@@ -82,13 +96,27 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
         return (await ToDtosAsync([rx], includeFileNumber: true, ct))[0];
     }
 
-    public async Task<PagedResult<PrescriptionDto>> DispensedAsync(DateOnly? date, int page, int pageSize, CancellationToken ct)
+    public Task<PagedResult<PrescriptionDto>> DispensedAsync(DateOnly? date, int page, int pageSize, CancellationToken ct) =>
+        DispensedAsync(new DispensedQuery(date, null, null, null, null, null), page, pageSize, ct);
+
+    /// <summary>الوصفات المصروفة في الفرع: يوم (date) أو فترة (from/to)، وفلترة بالطبيب والموظف واسم الدواء (6.2-ج).</summary>
+    public async Task<PagedResult<PrescriptionDto>> DispensedAsync(DispensedQuery f, int page, int pageSize, CancellationToken ct)
     {
         var p = new PageQuery(page, pageSize);
-        var day = date ?? clock.BaghdadToday();
-        DateTimeOffset start = ClockExtensions.ToUtc(day, TimeOnly.MinValue), end = ClockExtensions.ToUtc(day.AddDays(1), TimeOnly.MinValue);
+        var from = f.From ?? f.Date ?? clock.BaghdadToday();
+        var to = f.To ?? f.Date ?? from;
+        if (to < from || to.DayNumber - from.DayNumber > 92)
+            throw AppException.Validation(new Dictionary<string, string[]> { ["to"] = ["الفترة 93 يوماً كحد أقصى"] });
+        DateTimeOffset start = ClockExtensions.ToUtc(from, TimeOnly.MinValue), end = ClockExtensions.ToUtc(to.AddDays(1), TimeOnly.MinValue);
         var q = db.Prescriptions.AsNoTracking().Include(x => x.Lines)
             .Where(x => x.DispensedBranchId == current.BranchId && x.DispensedAt >= start && x.DispensedAt < end);
+        if (f.DoctorId is { } did) q = q.Where(x => x.DoctorId == did);
+        if (f.UserId is { } uid) q = q.Where(x => x.DispensedBy == uid);
+        if (!string.IsNullOrWhiteSpace(f.Drug))
+        {
+            var pattern = "%" + f.Drug.Trim() + "%";
+            q = q.Where(x => x.Lines.Any(l => EF.Functions.ILike(l.DrugName, pattern) || (l.SubstituteDrugName != null && EF.Functions.ILike(l.SubstituteDrugName, pattern))));
+        }
         var total = await q.CountAsync(ct);
         var rows = await q.OrderByDescending(x => x.DispensedAt).Skip((p.SafePage - 1) * p.SafePageSize).Take(p.SafePageSize).ToListAsync(ct);
         return new PagedResult<PrescriptionDto>(await ToDtosAsync(rows, true, ct), p.SafePage, p.SafePageSize, total);
@@ -124,6 +152,9 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
         var users = await db.Users.AsNoTracking().Where(u => userIds.Contains(u.UserId)).ToDictionaryAsync(u => u.UserId, u => u.FullName, ct);
         var now = clock.UtcNow;
         var today = clock.BaghdadToday();
+        var itemIds = rows.SelectMany(r => r.Lines).Where(l => l.InvoiceItemId != null).Select(l => l.InvoiceItemId!.Value).ToList();
+        var paid = itemIds.Count == 0 ? [] : await db.InvoiceItems.AsNoTracking().Where(i => itemIds.Contains(i.InvoiceItemId))
+            .ToDictionaryAsync(i => i.InvoiceItemId, i => i.Status, ct);
         return rows.Select(r =>
         {
             var x = info[r.ConsultationId];
@@ -131,7 +162,11 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
                 x.Patient.Gender, PatientPortalService.AgeOf(x.Patient, today), x.Doctor, x.Clinic, x.Branch, x.Diagnosis, r.IssuedAt, r.ExpiresAt,
                 ConsultationService.EffectiveStatus(r, now), r.DispensedAt, r.DispensedBy is { } u ? users.GetValueOrDefault(u) : null,
                 r.Lines.OrderBy(l => l.LineNo).Select(l => new PrescriptionItemDto(l.LineNo, l.DrugName, l.Dose, l.Frequency, l.DurationDays,
-                    l.Instructions, l.Dispensed, l.SubstituteDrugName, l.NotDispensedReason)).ToList());
+                    l.Instructions, l.Dispensed, l.SubstituteDrugName, l.NotDispensedReason)
+                {
+                    ServiceId = l.ServiceId, Quantity = l.Quantity, UnitPrice = l.UnitPrice, InvoiceItemId = l.InvoiceItemId,
+                    PaymentStatus = l.InvoiceItemId is { } ii ? paid.GetValueOrDefault(ii) : null,
+                }).ToList());
         }).ToList();
     }
 }

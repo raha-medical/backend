@@ -271,7 +271,7 @@ public class RbacTests(TestApp app)
             Assert.Equal(200, (await Api.GetAsync(c, "/api/v1/users")).Status);
             Assert.Equal(200, (await Api.GetAsync(c, "/api/v1/roles")).Status); // users.view يكفي لقائمة الأدوار
             Assert.Equal(403, (await Api.PostAsync(c, $"/api/v1/users/{Guid.NewGuid()}/disable")).Status);
-            Assert.Equal(403, (await Api.PostAsync(c, "/api/v1/branches", new { code = "ZZ1", name = "x" }, Guid.NewGuid())).Status);
+            Assert.Equal(403, (await Api.PostAsync(c, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code = "ZZ1", name = "x" }, Guid.NewGuid())).Status);
             Assert.Equal(403, (await Api.GetAsync(c, "/api/v1/queue/live")).Status);
         }
         finally
@@ -312,6 +312,8 @@ public class RbacTests(TestApp app)
             Assert.Equal(200, (await Api.PatchAsync(c, $"/api/v1/branches/{app.Branch2}", new { phone = "07700000002" })).Status);
             Assert.Equal(403, (await Api.PatchAsync(c, $"/api/v1/branches/{app.Branch1}", new { phone = "07700000001" })).Status);
             Assert.Equal(403, (await Api.PatchAsync(c, $"/api/v1/branches/{app.Branch2}", new { is_active = false })).Status);
+            // موقع الفرع على الخريطة للمدير العام فقط، حتى لمن يملك branches.edit (إرسال الموقع نفسه دون تغيير مسموح)
+            Assert.Equal(403, (await Api.PatchAsync(c, $"/api/v1/branches/{app.Branch2}", new { latitude = 33.2m, longitude = 44.2m })).Status);
             Assert.Equal(200, (await Api.GetAsync(c, $"/api/v1/branches/{app.Branch2}/overview")).Status);
             Assert.Equal(403, (await Api.GetAsync(c, $"/api/v1/branches/{app.Branch1}/overview")).Status);
         }

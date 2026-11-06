@@ -14,7 +14,7 @@ public class AdminFinanceTests(TestApp app)
     private async Task<Guid> NewBranchAsync(HttpClient admin)
     {
         var code = "F" + Random.Shared.Next(10000, 99999);
-        return Id((await Api.PostAsync(admin, "/api/v1/branches", new { code, name = $"فرع المال {code}" }, Guid.NewGuid())).Body, "branch_id");
+        return Id((await Api.PostAsync(admin, "/api/v1/branches", new { latitude = 33.3m, longitude = 44.4m, code, name = $"فرع المال {code}" }, Guid.NewGuid())).Body, "branch_id");
     }
 
     /// <summary>مريض يثبت حضوره عند الطبيب ويعيد بند الكشفية في سلته.</summary>
@@ -117,6 +117,36 @@ public class AdminFinanceTests(TestApp app)
         Assert.Equal(25000, L(mine.Body!["totals"]!["month_to_date"], "revenue_net"));
         Assert.Equal(403, (await Api.GetAsync(manager, $"/api/v1/reports/dashboard?branch_id={app.Branch1}")).Status);
         Assert.Equal(403, (await Api.GetAsync(s.Reception, "/api/v1/reports/dashboard")).Status);
+
+        // لوحة الإحصائيات: السلسلة اليومية والتوزيعات بنفس تعريف الإيراد، والنطاق نفسه
+        var stats = await Api.GetAsync(admin, $"/api/v1/reports/stats?branch_id={branch}");
+        Assert.Equal(200, stats.Status);
+        Assert.Equal(30, stats.Body!["days"]!.AsArray().Count);
+        var todayRow = stats.Body!["days"]!.AsArray().Last()!;
+        Assert.Equal(Today, S(todayRow, "date"));
+        Assert.Equal(25000, L(todayRow, "revenue"));
+        Assert.Equal(1, todayRow["visits"]!.GetValue<int>());
+        Assert.Equal(25000, L(stats.Body!["totals"], "revenue"));
+        Assert.Equal(25000, L(stats.Body!["departments"]!.AsArray().First(d => S(d, "key") == "clinic"), "value"));
+        Assert.Single(stats.Body!["branches"]!.AsArray());
+        Assert.Equal(7, stats.Body!["weekdays"]!.AsArray().Count);
+        // الدينار والدولار منفصلان: الدفعة نقداً بالدينار
+        Assert.Equal(25000, L(stats.Body!["currency"], "iqd"));
+        Assert.Equal(0, L(stats.Body!["currency"], "usd"));
+        Assert.Equal(25000, L(todayRow, "collected_iqd"));
+        Assert.Contains(stats.Body!["methods"]!.AsArray(), m => S(m, "key") == "cash_usd");
+        // مؤشرات خريطة المدير العام (UI-85، UI-87)
+        var ov = await Api.GetAsync(admin, "/api/v1/reports/branches-overview");
+        Assert.Equal(200, ov.Status);
+        var ovRow = ov.Body!["items"]!.AsArray().First(b => Id(b, "branch_id") == branch)!;
+        Assert.Equal(0, L(ovRow, "revenue_today_usd"));
+        Assert.Equal(1, ovRow["shifts_pending_review"]!.GetValue<int>());
+        Assert.NotNull(ov.Body!["queue_now"]);
+        Assert.Equal(403, (await Api.GetAsync(manager, "/api/v1/reports/branches-overview")).Status);
+        Assert.Equal(200, (await Api.GetAsync(manager, "/api/v1/reports/stats")).Status);
+        Assert.Equal(403, (await Api.GetAsync(manager, $"/api/v1/reports/stats?branch_id={app.Branch1}")).Status);
+        Assert.Equal(403, (await Api.GetAsync(s.Reception, "/api/v1/reports/stats")).Status);
+        Assert.Equal(400, (await Api.GetAsync(admin, "/api/v1/reports/stats?from=2024-01-01&to=2026-01-01")).Status);
     }
 
     [SkippableFact]

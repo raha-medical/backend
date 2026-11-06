@@ -19,8 +19,30 @@ public record FinancialStatement(DateOnly From, DateOnly To, string Group, IRead
 public record PaymentRow(Guid PaymentId, string BranchName, string? ReceiptNumber, string PatientName, string FileNumber, long Amount, string Methods, string? CashierName, DateTimeOffset CreatedAt);
 public record BranchOverviewRow(Guid BranchId, string Code, string Name, decimal? Latitude, decimal? Longitude, string LiveStatus, string LiveStatusAr, string? HoursToday,
     int PatientsToday, long RevenueToday, int DoctorsPresent, long RevenueMonth, long EntitlementsMonth, int StaffCount, int DoctorsCount, int ClinicsCount, int PatientsMonth,
-    decimal? AttendanceRate, decimal? CancellationRate);
-public record BranchesOverview(DateOnly Date, IReadOnlyList<BranchOverviewRow> Items, int Open, int Closed, int OpenAfterHours, int PatientsToday, long RevenueToday, int DoctorsPresent);
+    decimal? AttendanceRate, decimal? CancellationRate)
+{
+    /// <summary>المراجعون في الطابور الآن (حضروا ولم يكتمل دورهم).</summary>
+    public int QueueNow { get; init; }
+    /// <summary>المقبوض اليوم بالدولار (المبلغ الأصلي)، ومقابله بالدينار ضمن revenue_today.</summary>
+    public long RevenueTodayUsd { get; init; }
+    public long RevenueTodayUsdIqd { get; init; }
+    public int OnlineBookingsToday { get; init; }
+    public int RefundsToday { get; init; }
+    public long RefundsTodayAmount { get; init; }
+    public int OpenShifts { get; init; }
+    public int ShiftsPendingReview { get; init; }
+}
+public record BranchesOverview(DateOnly Date, IReadOnlyList<BranchOverviewRow> Items, int Open, int Closed, int OpenAfterHours, int PatientsToday, long RevenueToday, int DoctorsPresent)
+{
+    public int QueueNow { get; init; }
+    public long RevenueTodayUsd { get; init; }
+    public long RevenueTodayUsdIqd { get; init; }
+    public int OnlineBookingsToday { get; init; }
+    public int RefundsToday { get; init; }
+    public long RefundsTodayAmount { get; init; }
+    public int OpenShifts { get; init; }
+    public int ShiftsPendingReview { get; init; }
+}
 
 /// <summary>
 /// مستحقات الكوادر وصرفها، والكشوفات اليومية والشهرية، ولوحة المدير العام. عزل الفروع عبر ReportScope.
@@ -274,6 +296,35 @@ public class EntitlementService(IAppDbContext db, ICurrentUser current, IClock c
         var staff = await db.UserBranches.AsNoTracking().Where(u => ids.Contains(u.BranchId)).Join(db.Users.AsNoTracking().Where(u => u.IsActive), ub => ub.UserId, u => u.UserId, (ub, u) => ub.BranchId)
             .GroupBy(b => b).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
         var clinics = await db.Clinics.AsNoTracking().Where(c => ids.Contains(c.BranchId) && c.IsActive).GroupBy(c => c.BranchId).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+        var queueNow = await (from t in db.QueueTickets.AsNoTracking()
+                              join s in db.DoctorSessions.AsNoTracking() on t.SessionId equals s.SessionId
+                              where ids.Contains(t.BranchId) && s.SessionDate == day && t.ArrivedAt != null
+                                    && (t.Status == TicketStatuses.Waiting || t.Status == TicketStatuses.Arrived || t.Status == TicketStatuses.Called || t.Status == TicketStatuses.InRoom)
+                              group t by t.BranchId into g
+                              select new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+        DateTimeOffset dayStart = new ReportPeriod(day, day).StartUtc, dayEnd = new ReportPeriod(day, day).EndUtc;
+        var usd = await (from p in db.Payments.AsNoTracking()
+                         join t in db.PaymentTenders.AsNoTracking() on p.PaymentId equals t.PaymentId
+                         where ids.Contains(p.BranchId) && p.CreatedAt >= dayStart && p.CreatedAt < dayEnd && t.Currency == "USD"
+                         group t by p.BranchId into g
+                         select new { g.Key, Usd = g.Sum(t => t.OriginalAmount ?? 0), Iqd = g.Sum(t => t.Amount) }).ToDictionaryAsync(x => x.Key, ct);
+        var online = await (from b in db.Bookings.AsNoTracking()
+                            join s in db.DoctorSessions.AsNoTracking() on b.SessionId equals s.SessionId
+                            where ids.Contains(s.BranchId) && b.Source == AlRahma.Application.Bookings.BookingService.SourceOnline && b.CreatedAt >= dayStart && b.CreatedAt < dayEnd
+                            group b by s.BranchId into g
+                            select new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
+        var refundsToday = await (from r in db.Refunds.AsNoTracking()
+                                  join i in db.InvoiceItems.AsNoTracking() on r.InvoiceItemId equals i.InvoiceItemId
+                                  join inv in db.Invoices.AsNoTracking() on i.InvoiceId equals inv.InvoiceId
+                                  where r.Status == RefundStatuses.Completed && ids.Contains(inv.BranchId)
+                                        && (r.DecidedAt ?? r.CreatedAt) >= dayStart && (r.DecidedAt ?? r.CreatedAt) < dayEnd
+                                  group r.Amount by inv.BranchId into g
+                                  select new { g.Key, Count = g.Count(), Sum = g.Sum() }).ToDictionaryAsync(x => x.Key, ct);
+        var shifts = await db.Shifts.AsNoTracking()
+            .Where(s => ids.Contains(s.BranchId) && (s.Status == ShiftStatuses.Open || s.Status == ShiftStatuses.ClosedPendingReview))
+            .GroupBy(s => s.BranchId)
+            .Select(g => new { g.Key, Open = g.Count(s => s.Status == ShiftStatuses.Open), Pending = g.Count(s => s.Status == ShiftStatuses.ClosedPendingReview) })
+            .ToDictionaryAsync(x => x.Key, ct);
         var doctorCount = await db.Doctors.AsNoTracking().Where(d => d.IsActive && ids.Contains(d.Clinic!.BranchId)).GroupBy(d => d.Clinic!.BranchId).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
 
         var items = live.Select(b =>
@@ -288,9 +339,24 @@ public class EntitlementService(IAppDbContext db, ICurrentUser current, IClock c
             return new BranchOverviewRow(b.BranchId, b.Code, b.Name, src.Latitude, src.Longitude, b.LiveStatus, b.LiveStatusAr, hours,
                 tk.Select(t => t.PatientId).Distinct().Count(), today.NetOf(b.BranchId), tk.Select(t => t.DoctorId).Distinct().Count(),
                 mtd.NetOf(b.BranchId), shares[b.BranchId], staff.GetValueOrDefault(b.BranchId), doctorCount.GetValueOrDefault(b.BranchId), clinics.GetValueOrDefault(b.BranchId),
-                bk.Select(x => x.PatientId).Distinct().Count(), counted == 0 ? null : Math.Round(attended * 100m / counted, 1), bk.Count == 0 ? null : Math.Round(cancelled * 100m / bk.Count, 1));
+                bk.Select(x => x.PatientId).Distinct().Count(), counted == 0 ? null : Math.Round(attended * 100m / counted, 1), bk.Count == 0 ? null : Math.Round(cancelled * 100m / bk.Count, 1))
+            {
+                QueueNow = queueNow.GetValueOrDefault(b.BranchId),
+                RevenueTodayUsd = usd.TryGetValue(b.BranchId, out var u) ? u.Usd : 0,
+                RevenueTodayUsdIqd = u?.Iqd ?? 0,
+                OnlineBookingsToday = online.GetValueOrDefault(b.BranchId),
+                RefundsToday = refundsToday.TryGetValue(b.BranchId, out var rf) ? rf.Count : 0,
+                RefundsTodayAmount = rf?.Sum ?? 0,
+                OpenShifts = shifts.TryGetValue(b.BranchId, out var sh) ? sh.Open : 0,
+                ShiftsPendingReview = sh?.Pending ?? 0,
+            };
         }).ToList();
         return new BranchesOverview(day, items, items.Count(i => i.LiveStatus == "open"), items.Count(i => i.LiveStatus is not ("open" or "open_after_hours")), items.Count(i => i.LiveStatus == "open_after_hours"),
-            items.Sum(i => i.PatientsToday), items.Sum(i => i.RevenueToday), items.Sum(i => i.DoctorsPresent));
+            items.Sum(i => i.PatientsToday), items.Sum(i => i.RevenueToday), items.Sum(i => i.DoctorsPresent))
+        {
+            QueueNow = items.Sum(i => i.QueueNow), RevenueTodayUsd = items.Sum(i => i.RevenueTodayUsd), RevenueTodayUsdIqd = items.Sum(i => i.RevenueTodayUsdIqd),
+            OnlineBookingsToday = items.Sum(i => i.OnlineBookingsToday), RefundsToday = items.Sum(i => i.RefundsToday), RefundsTodayAmount = items.Sum(i => i.RefundsTodayAmount),
+            OpenShifts = items.Sum(i => i.OpenShifts), ShiftsPendingReview = items.Sum(i => i.ShiftsPendingReview),
+        };
     }
 }

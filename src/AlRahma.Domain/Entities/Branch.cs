@@ -5,6 +5,8 @@ public class Branch
     public Guid BranchId { get; set; }
     public string Code { get; set; } = "";
     public string Name { get; set; } = "";
+    /// <summary>الاسم بالإنجليزية (الترحيل 024، UI-94). اختياري، ولا يتكرر مثل الاسم العربي.</summary>
+    public string? NameEn { get; set; }
     public string? City { get; set; }
     public string? Address { get; set; }
     public string? Phone { get; set; }

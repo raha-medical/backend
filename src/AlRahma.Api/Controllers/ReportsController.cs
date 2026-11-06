@@ -13,7 +13,7 @@ namespace AlRahma.Api.Controllers;
 [Produces("application/json")]
 [Authorize]
 public class ReportsController(BranchSettlementService settlements, RevenueService revenue, DoctorReportService doctors, DashboardService dashboard,
-    AuditLogService auditLogs, EntitlementService entitlements) : ControllerBase
+    AuditLogService auditLogs, EntitlementService entitlements, StatsService stats) : ControllerBase
 {
     /// <summary>خريطة المدير العام: الحالة الحية ومؤشرات كل فرع.</summary>
     [HttpGet("branches-overview")]
@@ -66,6 +66,13 @@ public class ReportsController(BranchSettlementService settlements, RevenueServi
     [Authorize(Policy = Permissions.ReportsFinance)]
     public Task<DashboardDto> Dashboard([FromQuery(Name = "date")] DateOnly? date, [FromQuery(Name = "branch_id")] Guid? branchId, CancellationToken ct) =>
         dashboard.GetAsync(date, branchId, ct);
+
+    /// <summary>لوحة الإحصائيات: سلاسل يومية وتوزيعات ومقارنة بالفترة السابقة (الافتراضي آخر 30 يوماً، 366 كحد أقصى).</summary>
+    [HttpGet("stats")]
+    [Authorize(Policy = Permissions.ReportsFinance)]
+    [ProducesResponseType<StatsDto>(200)]
+    public Task<StatsDto> Stats([FromQuery(Name = "from")] DateOnly? from, [FromQuery(Name = "to")] DateOnly? to, [FromQuery(Name = "branch_id")] Guid? branchId,
+        CancellationToken ct) => stats.GetAsync(from, to, branchId, ct);
 
     /// <summary>الإيراد حسب القسم وطريقة الدفع والفرع: ليوم (date) أو لفترة (from/to).</summary>
     [HttpGet("daily-revenue")]

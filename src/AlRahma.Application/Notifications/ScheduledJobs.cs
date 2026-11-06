@@ -362,8 +362,11 @@ public class ScheduledJobs(IAppDbContext db, IClock clock, NotificationService n
         {
             await notifications.NotifyUsersAsync(admins, null, NotificationTypes.BackupFailed, "لا توجد نسخة احتياطية حديثة",
                 lastOk is { } t
-                    ? $"آخر نسخة ناجحة كانت {t.ToOffset(ClockExtensions.BaghdadOffset):yyyy-MM-dd HH:mm} (أكثر من {opt.MaxHoursWithoutSuccess} ساعة). تحقق من سيرفر قاعدة البيانات."
-                    : "لم تُسجل أي نسخة احتياطية ناجحة بعد. تحقق من تشغيل حاوية النسخ الاحتياطي.",
+                    ? $"آخر نسخة ناجحة كانت {t.ToOffset(ClockExtensions.BaghdadOffset):yyyy-MM-dd HH:mm} (أكثر من {opt.MaxHoursWithoutSuccess} ساعة). "
+                      + (opt.IsNative ? "افتح شاشة النسخ الاحتياطي واضغط «نسخ الآن»، وتحقق من مساحة القرص." : "تحقق من سيرفر قاعدة البيانات.")
+                    : opt.IsNative
+                        ? "لم تُسجل أي نسخة احتياطية ناجحة بعد. افتح شاشة النسخ الاحتياطي واضغط «نسخ الآن»."
+                        : "لم تُسجل أي نسخة احتياطية ناجحة بعد. تحقق من تشغيل حاوية النسخ الاحتياطي.",
                 "backup_stale", null, ct);
             sent++;
         }

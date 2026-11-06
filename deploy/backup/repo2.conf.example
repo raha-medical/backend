@@ -1,0 +1,34 @@
+# =============================================================================
+# الموقع الثاني (اختياري). اختر طريقة واحدة، انسخ هذا الملف إلى conf.d/repo2.conf،
+# ثم ضع BACKUP_REPO2=1 و Backup__Repo2Enabled=true. كلمة السر في PGBACKREST_REPO2_CIPHER_PASS.
+# =============================================================================
+[global]
+repo2-cipher-type=aes-256-cbc
+repo2-retention-full-type=count
+repo2-retention-full=9999
+repo2-retention-archive-type=full
+repo2-retention-archive=2
+repo2-bundle=y
+repo2-block=y
+
+# --- أ) قرص ثانٍ أو مجلد مشترك (NFS/SMB) من سيرفر فرع آخر: مجاني -----------------
+repo2-type=posix
+repo2-path=/mnt/backup2/pgbackrest
+
+# --- ب) سيرفر فرع آخر عبر SFTP: مجاني --------------------------------------------
+# repo2-type=sftp
+# repo2-path=/srv/alrahma-backup
+# repo2-sftp-host=branch2.example.local
+# repo2-sftp-host-user=backup
+# repo2-sftp-private-key-file=/etc/pgbackrest/keys/id_ed25519
+# repo2-sftp-host-key-hash-type=sha256
+# repo2-sftp-host-fingerprint=CHANGE_ME
+
+# --- ج) تخزين S3 متوافق (MinIO على سيرفر آخر مجاناً، أو سحابي باشتراك) ------------
+# repo2-type=s3
+# repo2-path=/alrahma
+# repo2-s3-bucket=alrahma-backup
+# repo2-s3-endpoint=s3.example.com
+# repo2-s3-region=us-east-1
+# repo2-s3-uri-style=path
+# المفاتيح من البيئة: PGBACKREST_REPO2_S3_KEY و PGBACKREST_REPO2_S3_KEY_SECRET

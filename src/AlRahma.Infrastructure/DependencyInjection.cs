@@ -39,6 +39,10 @@ public static class DependencyInjection
         services.Configure<ReceiptOptions>(config.GetSection(ReceiptOptions.Section));
         services.Configure<OtpOptions>(config.GetSection(OtpOptions.Section));
         services.Configure<BackupOptions>(config.GetSection(BackupOptions.Section));
+        // النسخ الأصلي (Backup:Mode=native): pg_dump + ملفات التخزين + مفتاح التوقيع، على الجهاز نفسه
+        services.AddSingleton<Backups.NativeBackupExecutor>();
+        services.AddSingleton<AlRahma.Application.Backups.IBackupExecutor>(sp => sp.GetRequiredService<Backups.NativeBackupExecutor>());
+        services.AddSingleton<AlRahma.Application.Backups.IBackupEnvironment>(sp => sp.GetRequiredService<Backups.NativeBackupExecutor>());
         services.Configure<OnlinePaymentOptions>(config.GetSection(OnlinePaymentOptions.Section));
         // رمز QR تثبيت الحضور: مفتاح مستقل اختياري (CheckIn__SigningKey)، وإلا يُشتق من مفتاح JWT
         services.Configure<AlRahma.Application.Queue.CheckInOptions>(config.GetSection(AlRahma.Application.Queue.CheckInOptions.Section));

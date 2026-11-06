@@ -1,6 +1,56 @@
 # النسخ الاحتياطي والاسترجاع (مجاني، pgBackRest)
 
-## الملخص
+> **على Windows بدون Docker** (جهاز المجمع، `start-native.bat`) يعمل النسخ الأصلي `Backup__Mode=native` داخل الـ API نفسه.
+> انظر القسم [Windows بدون Docker](#windows-بدون-docker-backup__modenative). باقي هذا الملف لتشغيل Docker و pgBackRest على Linux.
+
+## Windows بدون Docker (Backup__Mode=native)
+
+| البند | القيمة |
+|---|---|
+| المنفذ | الـ API نفسه (`BackupWorker` كل دقيقة) بـ `pg_dump -Fc` ثم التحقق بـ `pg_restore --list` |
+| محتوى كل نسخة | مجلد واحد في `Backup__Path` (افتراضياً `D:\AlRahmaBackups`): `db.dump` + `files\` (نسخة من بيانات تخزين الملفات SeaweedFS) + `keys\drawer-es256.pem` (مفتاح توقيع الإيصالات) + `manifest.json` |
+| التوقيت | يومياً في "وقت النسخ اليومي" من شاشة النسخ الاحتياطي (افتراضياً 03:00 بغداد). يُطبق فوراً. إن كان الجهاز مطفأً وقتها تؤخذ عند أول تشغيل بعده |
+| القرص الخارجي | اختياري `Backup__OffsitePath`. غير المتصل = "بانتظار القرص الخارجي" بلا فشل، وتُنسخ إليه تلقائياً عند توصيله |
+| الاحتفاظ | آخر 14 نسخة ناجحة (`Backup__Keep`)، والأقدم يُحذف مجلده تلقائياً ويبقى سجله |
+| المهلة | الطلب أو التنفيذ العالق أكثر من 10 دقائق يصبح "فشلت"، ويصل تنبيه للمدير العام عند الفشل أو 26 ساعة بلا نسخة ناجحة |
+| كلمة مرور القاعدة | من `local-env.bat` (لا تُكتب في الكود ولا في مجلد النسخة)؛ تُمرر لـ pg_dump بمتغير البيئة فقط |
+
+`start-native.bat` يضبط: `Backup__Enabled=true`، `Backup__Mode=native`، `Backup__PgBin` (نفس مجلد psql)، `Backup__FilesPath` (مجلد `local-data\s3\data`). لتغيير مجلد النسخ أو إضافة قرص خارجي ضع في `local-env.bat`:
+
+```bat
+set "BACKUP_PATH=D:\AlRahmaBackups"
+set "BACKUP_OFFSITE_PATH=E:\AlRahmaBackups"
+```
+
+> **مهم:** مجلد النسخة يحتوي مفتاح توقيع الإيصالات وبيانات المرضى. لا تشاركه، واحفظ القرص الخارجي في مكان آمن.
+
+### الاسترجاع على Windows
+
+1. أغلق نوافذ "Al-Rahma API" و "Frontend" و "File Storage" حتى لا تُكتب بيانات جديدة.
+2. اختر مجلد النسخة، مثل `D:\AlRahmaBackups\alrahma_staging_20261106-180500_manual`، وافتح فيه `cmd`. تحقق من سلامتها:
+   ```bat
+   "C:\Program Files\PostgreSQL\16\bin\pg_restore.exe" --list db.dump > nul && echo OK
+   ```
+3. قاعدة البيانات (يحذف البيانات الحالية للقاعدة؛ للتجربة استرجع إلى اسم آخر مثل `alrahma_restore_test`):
+   ```bat
+   set PGBIN=C:\Program Files\PostgreSQL\16\bin
+   "%PGBIN%\dropdb.exe" -U postgres alrahma_staging
+   "%PGBIN%\createdb.exe" -U postgres alrahma_staging
+   "%PGBIN%\pg_restore.exe" -U postgres -d alrahma_staging --no-owner --no-tablespaces db.dump
+   ```
+4. الملفات المرفوعة: أعد تسمية `local-data\s3\data` إلى `data.old`، ثم انسخ مجلد `files` من النسخة مكانه:
+   `robocopy files D:\Progect\alrahma-staging\local-data\s3\data /E`
+5. مفتاح توقيع الإيصالات: انسخ `keys\drawer-es256.pem` إلى `local-data\keys\` (فوق الموجود).
+6. شغّل `start-native.bat`، وتأكد من الدخول وفتح ملف مريض فيه مرفقات، ثم احذف `data.old`.
+
+### تجربة فعلية على Windows (2026-11-06، قاعدة `alrahma_staging`)
+
+1. تغيير "وقت النسخ اليومي" من الشاشة إلى 02:30 ثم إعادة تحميل الصفحة: بقي 02:30، وموعد النسخة التالية تغيّر.
+2. "نسخ الآن": نجحت خلال ثوانٍ. المجلد فيه `db.dump` (0.4MB، 74 جدول بيانات حسب `pg_restore --list`) و `files\` (كل ملفات التخزين، 59KB؛ تُخطّت ملفات `LOCK` الفارغة لقاعدة الـ filer لأنها مقفلة) و `keys\drawer-es256.pem`.
+3. استرجاع `db.dump` في قاعدة جديدة `alrahma_restore_test`: 74 جدولاً بنفس عدد الصفوف، عدا `audit_logs` بفرق سطر واحد (سطر "نجاح النسخة" يُكتب بعد الـ dump). ثم حُذفت القاعدة التجريبية.
+4. التدقيق: الطلب اليدوي وتغيير الوقت باسم المدير، ونجاح النسخة باسم "النظام".
+
+## الملخص (Docker و pgBackRest)
 
 | البند | القيمة |
 |---|---|

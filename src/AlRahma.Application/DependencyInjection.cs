@@ -66,6 +66,7 @@ public static class DependencyInjection
         services.AddScoped<Notifications.NotificationService>();
         services.AddScoped<Notifications.ScheduledJobs>();
         services.AddScoped<Backups.BackupService>();
+        services.AddScoped<Backups.BackupRunner>();
         services.AddScoped<PatientApp.PatientAuthService>();
         services.AddScoped<PatientApp.PatientPortalService>();
         services.AddScoped<PatientApp.FastForwardService>();

@@ -8,7 +8,7 @@ namespace AlRahma.Api.Controllers;
 
 /// <summary>
 /// النسخ الاحتياطي (المدير العام فقط). لا تنزيل للنسخ من الواجهة، والاسترجاع من السيرفر فقط.
-/// الـ API لا ينفذ أوامر على السيرفر: "تشغيل الآن" يسجل طلباً ينفذه سكربت النسخ خلال دقيقة.
+/// "تشغيل الآن" يسجل طلباً ينفذه خلال دقيقة سكربت النسخ (Docker) أو المنفذ الأصلي داخل الـ API (Backup:Mode=native).
 /// </summary>
 [ApiController]
 [Route("api/v1/admin/backups")]
@@ -29,6 +29,12 @@ public class BackupsController(BackupService backups) : ControllerBase
         [FromQuery(Name = "page_size")] int pageSize = 20,
         CancellationToken ct = default) =>
         backups.ListAsync(type, status, new PageQuery(page, pageSize), ct);
+
+    /// <summary>وقت النسخ اليومي (بغداد، HH:mm). يُطبق فوراً بلا إعادة تشغيل.</summary>
+    [HttpPut("settings")]
+    [ProducesResponseType<BackupStatusDto>(200)]
+    public Task<BackupStatusDto> UpdateSettings([FromBody] UpdateBackupSettingsRequest req, CancellationToken ct) =>
+        backups.UpdateSettingsAsync(req, ct);
 
     [HttpPost("run")]
     [ProducesResponseType<BackupRunDto>(202)]

@@ -278,6 +278,27 @@ public class BackupOptions
     /// <summary>ساعات بلا نسخة ناجحة قبل تنبيه المدير.</summary>
     public int MaxHoursWithoutSuccess { get; set; } = 26;
     public BackupFilesOptions Files { get; set; } = new();
+
+    // ------------------------------------------------------------------ النسخ الأصلي على Windows بدون Docker
+    /// <summary>script (افتراضي: سكربت pgBackRest في deploy/backup) | native: الـ API نفسه ينفذ الطلبات بـ pg_dump.</summary>
+    public string Mode { get; set; } = "script";
+    public bool IsNative => string.Equals(Mode, "native", StringComparison.OrdinalIgnoreCase);
+    /// <summary>مجلد النسخ المحلي. كل نسخة مجلد فرعي فيه.</summary>
+    public string Path { get; set; } = @"D:\AlRahmaBackups";
+    /// <summary>اختياري: قرص خارجي أو مجلد مشترك. غير المتصل = "بانتظار القرص الخارجي" ولا تفشل النسخة.</summary>
+    public string? OffsitePath { get; set; }
+    /// <summary>مجلد bin الخاص بـ PostgreSQL (فيه pg_dump.exe). فارغ = البحث في C:\Program Files\PostgreSQL ثم PATH.</summary>
+    public string? PgBin { get; set; }
+    /// <summary>مجلد بيانات تخزين الملفات (SeaweedFS -dir). فارغ = لا تُنسخ الملفات.</summary>
+    public string? FilesPath { get; set; }
+    /// <summary>مفتاح توقيع الإيصالات. فارغ = Drawer:KeyFile.</summary>
+    public string? KeyFile { get; set; }
+    /// <summary>عدد النسخ الناجحة المحتفظ بها، والأقدم يُحذف تلقائياً.</summary>
+    public int Keep { get; set; } = 14;
+    /// <summary>الطلب أو التنفيذ العالق أكثر من هذه الدقائق يُعلَّم فاشلاً.</summary>
+    public int TimeoutMinutes { get; set; } = 10;
+    /// <summary>وقت النسخ اليومي الافتراضي (بغداد) ما لم يحدده المدير العام من الشاشة.</summary>
+    public string DefaultDailyTime { get; set; } = "03:00";
 }
 
 public class BackupFilesOptions

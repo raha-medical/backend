@@ -47,6 +47,7 @@ public class BranchIsolationTests(TestApp app)
         var expense = await Api.PostAsync(s.Reception, "/api/v1/expenses",
             new { category = "cleaning", amount = 3000, description = "مواد تنظيف", paid_from = "shift_cash" }, Guid.NewGuid());
         Assert.Equal(201, expense.Status);
+        await DailyAccount.PrintAllAsync(s.Reception);
         Assert.Equal(200, (await Api.PostAsync(s.Reception, $"/api/v1/shifts/{shift}/close", new { declared = new { cash = 22000 } }, Guid.NewGuid())).Status);
 
         // آجل على زيارة ثانية

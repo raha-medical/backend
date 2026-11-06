@@ -44,8 +44,9 @@ public class BillingTests(TestApp app)
 
         var paid = await Api.PostAsync(s.Reception, "/api/v1/payments", pay, Guid.NewGuid());
         Assert.Equal(201, paid.Status);
-        Assert.True(paid.Body!["open_drawer"]!.GetValue<bool>());
-        Assert.Equal(3, S(paid.Body, "drawer_token").Split('.').Length);
+        // 7.1-أ: درج النقود موقوف بالكامل (الطابعة فقط): لا توكن ولا فتح درج
+        Assert.False(paid.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.Null(paid.Body!["drawer_token"]?.GetValue<string>());
         var receipt = paid.Body!["receipt"]!;
         Assert.Contains("-R-", S(receipt, "receipt_number"));
         Assert.Equal("ITEM_NOT_PAYABLE", (await Api.PostAsync(s.Reception, "/api/v1/payments", pay, Guid.NewGuid())).Code);
@@ -75,15 +76,19 @@ public class BillingTests(TestApp app)
         Assert.Equal(2, (await Api.PostAsync(s.Reception, $"/api/v1/receipts/{receiptId}/reprint")).Body!["copy_number"]!.GetValue<int>());
         Assert.Equal("REPRINT_LIMIT", (await Api.PostAsync(s.Reception, $"/api/v1/receipts/{receiptId}/reprint")).Code);
 
-        // استرجاع نقدي ضمن حد الاستقبال: فوري، وحصة الطبيب تنقص بنسبتها (70%)
-        var refund = await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
+        // قرار المالك: الاسترجاع النقدي اليدوي بموافقة المحاسب دائماً مهما كان المبلغ. بعدها حصة الطبيب تنقص بنسبتها (70%)
+        var requested = await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
             new { amount = 10000, method = "cash", reason = "خطأ في التسعير" }, Guid.NewGuid());
-        Assert.Equal(201, refund.Status);
+        Assert.Equal(201, requested.Status);
+        Assert.Equal("pending_approval", S(requested.Body, "status"));
+        var (_, approverToken) = await app.CreateStaffAsync("accountant");
+        var refund = await Api.PostAsync(app.Client(approverToken), $"/api/v1/refunds/{Id(requested.Body, "refund_id")}/approve");
+        Assert.True(refund.Status == 200, refund.Raw);
         Assert.Equal("completed", S(refund.Body, "status"));
         Assert.Equal(-7000, L(refund.Body, "doctor_share_adjustment"));
         Assert.Equal(-3000, L(refund.Body, "complex_share_adjustment"));
         Assert.Equal(15000, L(refund.Body, "invoice_paid_after"));
-        Assert.True(refund.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.False(refund.Body!["open_drawer"]!.GetValue<bool>());
         Assert.Contains("-RF-", S(refund.Body!["receipt"], "receipt_number"));
         Assert.Equal("REFUND_EXCEEDS_PAID", (await Api.PostAsync(s.Reception, $"/api/v1/invoice-items/{item}/refunds",
             new { amount = 20000, method = "cash", reason = "x" }, Guid.NewGuid())).Code);
@@ -96,6 +101,7 @@ public class BillingTests(TestApp app)
 
         // الإغلاق الأعمى: الموظف يدخل ما عدّه (ناقص 1000)، ولا يرى المتوقع
         Assert.Equal(403, (await Api.GetAsync(s.Reception, $"/api/v1/shifts/{shiftId}/reconciliation")).Status);
+        await DailyAccount.PrintAllAsync(s.Reception);
         var close = await Api.PostAsync(s.Reception, $"/api/v1/shifts/{shiftId}/close",
             new { declared = new { cash = 59000, pos_slips_count = 1, pos_total = 5000 }, cash_denominations = new Dictionary<string, int> { ["25000"] = 2, ["5000"] = 1, ["1000"] = 4 } },
             Guid.NewGuid());
@@ -158,7 +164,7 @@ public class BillingTests(TestApp app)
         Assert.False(unban.Body!["is_banned"]!.GetValue<bool>());
         Assert.Equal(10000, L(unban.Body, "deposit_credit"));
         Assert.Equal("deposit", S(unban.Body!["receipt"], "type"));
-        Assert.True(unban.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.False(unban.Body!["open_drawer"]!.GetValue<bool>());
 
         // التحصيل باستخدام الرصيد
         var basket = await Api.GetAsync(rec, $"/api/v1/patients/{patient}/billable-items?department=lab");

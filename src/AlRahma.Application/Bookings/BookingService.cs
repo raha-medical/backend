@@ -76,7 +76,7 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
     DoctorService doctors, FileService files, SettingsReader settings, BanService bans, QueueNotifier notifier,
     AlRahma.Application.Branches.ClosureService closures, PatientApp.PatientPortalService portal,
     Microsoft.Extensions.Options.IOptions<OnlinePaymentOptions> paymentOptions, Notifications.NotificationService notifications,
-    NumberSequences numbers)
+    NumberSequences numbers, PatientApp.Gateways.PaymentGatewayRegistry gateways)
 {
     public const int MaxAvailabilityDays = 31;
 
@@ -441,12 +441,15 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
         long credit = 0, refund = 0;
         if (e.Paid > 0 && e.PaidTo == SettingsReader.CancelPaidToValues.Refund)
         {
-            // إرجاع لوسيلة الدفع الإلكتروني (البوابة التجريبية تعكس فوراً)
+            // إرجاع لوسيلة الدفع الإلكتروني عبر البوابة (5.1-ج)
             refund = e.Paid;
             booking.PaymentStatus = PaymentStatuses.Refunded;
             foreach (var op in await db.OnlinePayments.Where(o => o.BookingId == booking.BookingId && o.Purpose == OnlinePaymentPurposes.BookingFull
                                                                   && o.Status == OnlinePaymentStatuses.Succeeded).ToListAsync(ct))
+            {
+                await gateways.RefundAsync(op, op.Amount, ct);
                 op.Status = OnlinePaymentStatuses.Refunded;
+            }
         }
         else if (e.Paid > 0)
         {

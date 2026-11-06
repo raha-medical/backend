@@ -51,7 +51,7 @@ public class AdminFinanceTests(TestApp app)
         var cashExpense = await Api.PostAsync(s.Reception, "/api/v1/expenses",
             new { category = "cleaning", amount = 5000, description = "مواد تنظيف", payee = "محل النور", paid_from = "shift_cash" }, Guid.NewGuid());
         Assert.Equal(201, cashExpense.Status);
-        Assert.True(cashExpense.Body!["open_drawer"]!.GetValue<bool>());
+        Assert.False(cashExpense.Body!["open_drawer"]!.GetValue<bool>()); // 7.1-أ: الدرج موقوف
         Assert.Contains("-EXP-", S(cashExpense.Body, "expense_number"));
         Assert.Equal(shift, Id(cashExpense.Body, "shift_id"));
         Assert.Equal("NO_OPEN_SHIFT", (await Api.PostAsync(manager, "/api/v1/expenses",
@@ -67,6 +67,7 @@ public class AdminFinanceTests(TestApp app)
         Assert.Equal("إيجار", S(expenses.Body!["by_category"]![0], "category_name"));
 
         // الإغلاق الأعمى يطرح مصروف الدرج من المتوقع: 25,000 − 5,000
+        await DailyAccount.PrintAllAsync(s.Reception);
         var closed = await Api.PostAsync(s.Reception, $"/api/v1/shifts/{shift}/close", new { declared = new { cash = 20000 } }, Guid.NewGuid());
         Assert.Equal(200, closed.Status);
         var rec = await Api.GetAsync(accountant, $"/api/v1/shifts/{shift}/reconciliation");

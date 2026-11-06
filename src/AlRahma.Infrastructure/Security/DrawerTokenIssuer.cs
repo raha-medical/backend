@@ -21,6 +21,8 @@ public class DrawerOptions
     /// </summary>
     public string KeyFile { get; set; } = "App_Data/drawer-es256.pem";
     public int LifetimeSeconds { get; set; } = 60;
+    /// <summary>من Hardware:CashDrawerEnabled (افتراضياً false: الدرج موقوف بالكامل).</summary>
+    public bool CashDrawerEnabled { get; set; }
 }
 
 public sealed class DrawerTokenIssuer : IDrawerTokenIssuer, IDisposable
@@ -57,6 +59,7 @@ public sealed class DrawerTokenIssuer : IDrawerTokenIssuer, IDisposable
         log.LogWarning("Drawer key generated and saved to {Path}. Back it up; agents trust its public key.", path);
     }
 
+    public bool Enabled => _o.CashDrawerEnabled;
     public string PublicKeyPem { get; }
     public string PublicKeyId { get; }
 

@@ -16,6 +16,10 @@ public class ScheduledJobsWorker(IServiceScopeFactory scopes, ILogger<ScheduledJ
             {
                 using var scope = scopes.CreateScope();
                 var jobs = scope.ServiceProvider.GetRequiredService<ScheduledJobs>();
+                // الحساب اليومي من يوم سابق يُغلق تلقائياً بانتظار إقرار الموظف
+                await scope.ServiceProvider.GetRequiredService<AlRahma.Application.Billing.ShiftService>().AutoClosePreviousDayAsync(stoppingToken);
+                // الاستعلام من البوابة عن المعلّق قبل تعليمه منتهياً (مصدر الحقيقة البوابة)
+                await scope.ServiceProvider.GetRequiredService<AlRahma.Application.PatientApp.OnlinePaymentService>().SyncPendingAsync(stoppingToken);
                 await jobs.ExpireOnlinePaymentsAsync(stoppingToken);
                 await jobs.ExpireReferralsAsync(stoppingToken);
                 await jobs.DispatchPushAsync(stoppingToken);

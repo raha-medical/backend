@@ -136,7 +136,7 @@ public class AuthService(
         var hasOpenShift = await db.ExistsAsync(
             $"SELECT EXISTS (SELECT 1 FROM shifts WHERE user_id = {current.UserId} AND status = 'open') AS \"Value\"", ct);
         if (hasOpenShift)
-            throw new AppException(409, "SHIFT_OPEN", "لا يمكن تبديل الفرع مع وجود وردية مفتوحة");
+            throw new AppException(409, "SHIFT_OPEN", "لا يمكن تبديل الفرع مع وجود حساب يومي مفتوح");
 
         var user = await LoadUserQuery().FirstAsync(u => u.UserId == current.UserId, ct);
         await EnsureBranchAllowedAsync(user, req.BranchId!.Value, ct);

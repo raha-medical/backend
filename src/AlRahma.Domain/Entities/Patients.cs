@@ -201,4 +201,6 @@ public class QueueTicket
     public DateTimeOffset? FreeReturnUntil { get; set; }
     /// <summary>تذكرة «عودة بالنتائج» في وجبة أخرى: التذكرة الأصلية.</summary>
     public Guid? OriginalTicketId { get; set; }
+    /// <summary>الموظف الذي أكّد الحضور (الترحيل 020). NULL للتأكيد الذاتي بالـ QR.</summary>
+    public Guid? CheckedInBy { get; set; }
 }

@@ -5,6 +5,7 @@ using AlRahma.Application.Clinical;
 using AlRahma.Application.Common;
 using AlRahma.Application.Notifications;
 using AlRahma.Application.PatientApp;
+using AlRahma.Application.PatientApp.Gateways;
 using AlRahma.Domain.Common;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -152,39 +153,62 @@ public class OnlinePaymentsController(OnlinePaymentService payments) : Controlle
     [ProducesResponseType<OnlinePaymentDto>(200)]
     public Task<OnlinePaymentDto> Get(Guid onlinePaymentId, CancellationToken ct) => payments.GetAsync(onlinePaymentId, ct);
 
-    /// <summary>صفحة البوابة التجريبية (زر نجاح وزر فشل).</summary>
-    [HttpGet("api/v1/sandbox/pay/{onlinePaymentId:guid}")]
-    [AllowAnonymous]
-    [Produces("text/html")]
-    public async Task<ContentResult> SandboxPage(Guid onlinePaymentId, CancellationToken ct) =>
-        Content(await payments.SandboxPageAsync(onlinePaymentId, ct), "text/html; charset=utf-8");
+    /// <summary>بوابات الدفع المتاحة للمراجع (زين كاش، كي كارد) حسب الإعداد.</summary>
+    [HttpGet("api/v1/online-payments/providers")]
+    [Authorize(Policy = Policies.StaffOrPatient)]
+    [ProducesResponseType<IReadOnlyList<PaymentProviderDto>>(200)]
+    public IReadOnlyList<PaymentProviderDto> Providers() => payments.Providers();
 
-    /// <summary>محاكاة إشعار البوابة: { "result": "succeeded" | "failed" }.</summary>
-    [HttpPost("api/v1/sandbox/pay/{onlinePaymentId:guid}")]
-    [AllowAnonymous]
-    [Consumes("application/json", "application/x-www-form-urlencoded")]
+    /// <summary>بعد العودة من صفحة البوابة: يستعلم عن المعاملة لدى البوابة ثم يعيد الحالة. لا شيء يُعلَّم مدفوعاً إلا بهذا الاستعلام.</summary>
+    [HttpPost("api/v1/online-payments/{onlinePaymentId:guid}/verify")]
+    [Authorize(Policy = Policies.StaffOrPatient)]
     [ProducesResponseType<OnlinePaymentDto>(200)]
-    public async Task<IActionResult> SandboxComplete(Guid onlinePaymentId, CancellationToken ct)
-    {
-        SandboxPayRequest req;
-        if (Request.HasFormContentType) req = new SandboxPayRequest((await Request.ReadFormAsync(ct))["result"].ToString());
-        else req = await Request.ReadFromJsonAsync<SandboxPayRequest>(new System.Text.Json.JsonSerializerOptions
-                   { PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower, PropertyNameCaseInsensitive = true }, ct)
-               ?? new SandboxPayRequest(null);
-        var dto = await payments.SandboxCompleteAsync(onlinePaymentId, req, ct);
-        return Request.HasFormContentType ? Content(SandboxDone(dto.Status), "text/html; charset=utf-8") : Ok(dto);
-    }
+    public Task<OnlinePaymentDto> Verify(Guid onlinePaymentId, CancellationToken ct) => payments.VerifyAsync(onlinePaymentId, ct);
 
-    /// <summary>إشعارات بوابات الدفع الحقيقية: لم تُربط بعد (الوضع التجريبي فقط حالياً).</summary>
+    /// <summary>
+    /// إشعار البوابة (Webhook): مقبول فقط بتوقيع HMAC صالح في X-Signature (سر Payments__Providers__{provider}__WebhookSecret)،
+    /// ومحتواه لا يُعتمد: يؤدي إلى استعلام رسمي من البوابة. بلا توقيع صالح = 401.
+    /// </summary>
     [HttpPost("api/v1/webhooks/payments/{provider}")]
     [AllowAnonymous]
-    public IActionResult Webhook(string provider) =>
-        throw new AppException(404, "PROVIDER_NOT_AVAILABLE", "مزود الدفع غير مفعّل", $"{provider} لم يُربط بعد");
+    public async Task<IActionResult> Webhook(string provider, CancellationToken ct)
+    {
+        using var reader = new StreamReader(Request.Body);
+        var body = await reader.ReadToEndAsync(ct);
+        return Ok(new { status = await payments.WebhookAsync(provider, body, Request.Headers["X-Signature"].FirstOrDefault(), ct) });
+    }
+}
 
-    private static string SandboxDone(string status) =>
-        $"<!doctype html><html lang=\"ar\" dir=\"rtl\"><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\">" +
-        $"<body style=\"font-family:sans-serif;text-align:center;padding:40px\"><h2>{(status == "succeeded" ? "تم الدفع بنجاح" : "لم يتم الدفع")}</h2>" +
-        "<p>ارجع إلى التطبيق.</p></body></html>";
+/// <summary>
+/// صفحة البوابة التجريبية لزين كاش وكي كارد (بديل صفحة البوابة الحقيقية). كل الخطوات تتطلب دخول المريض صاحب الدفعة.
+/// تغيّر حالة المعاملة لدى «البوابة» فقط، والحجز لا يُدفع إلا بعد POST /online-payments/{id}/verify.
+/// </summary>
+[ApiController]
+[Route("api/v1/mock-gateway/{reference}")]
+[Produces("application/json")]
+[Authorize(Policy = Policies.Patient)]
+public class MockGatewayController(MockGatewayService gateway) : ControllerBase
+{
+    [HttpGet]
+    [ProducesResponseType<MockGatewayPageDto>(200)]
+    public Task<MockGatewayPageDto> Get(string reference, CancellationToken ct) => gateway.GetAsync(reference, ct);
+
+    /// <summary>زين كاش: wallet_number + pin. كي كارد: card_number + expiry (MM/YY) + cvv.</summary>
+    [HttpPost("credentials")]
+    [ProducesResponseType<MockGatewayPageDto>(200)]
+    public Task<MockGatewayPageDto> Credentials(string reference, MockCredentialsRequest req, CancellationToken ct) => gateway.SubmitCredentialsAsync(reference, req, ct);
+
+    [HttpPost("otp")]
+    [ProducesResponseType<MockGatewayPageDto>(200)]
+    public Task<MockGatewayPageDto> Otp(string reference, MockOtpRequest req, CancellationToken ct) => gateway.VerifyOtpAsync(reference, req, ct);
+
+    [HttpPost("otp/resend")]
+    [ProducesResponseType<MockGatewayPageDto>(200)]
+    public Task<MockGatewayPageDto> Resend(string reference, CancellationToken ct) => gateway.ResendOtpAsync(reference, ct);
+
+    [HttpPost("cancel")]
+    [ProducesResponseType<MockGatewayPageDto>(200)]
+    public Task<MockGatewayPageDto> Cancel(string reference, CancellationToken ct) => gateway.CancelAsync(reference, ct);
 }
 
 /// <summary>التقديم الذكي: عرض الاستقبال وجواب المريض.</summary>

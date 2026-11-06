@@ -7,6 +7,7 @@ using AlRahma.Application.Notifications;
 using AlRahma.Application.Patients;
 using AlRahma.Domain.Common;
 using AlRahma.Domain.Entities;
+using AlRahma.Application.PatientApp.Gateways;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 
@@ -15,18 +16,18 @@ namespace AlRahma.Application.PatientApp;
 public record CreateOnlinePaymentRequest(Guid? OnlinePaymentId, string? Purpose, Guid? PatientId, Guid? BookingId, Guid? InvoiceId, string? Provider, Guid? InvoiceItemId = null);
 public record OnlineReceiptDto(Guid ReceiptId, string ReceiptNumber, string QrCode);
 public record OnlinePaymentDto(Guid OnlinePaymentId, string Purpose, Guid PatientId, Guid? BookingId, Guid? InvoiceId, long Amount, string Status,
-    string Provider, string? RedirectUrl, DateTimeOffset ExpiresAt, DateTimeOffset CreatedAt, DateTimeOffset? CompletedAt, OnlineReceiptDto? Receipt);
-public record SandboxPayRequest(string? Result);
+    string Provider, string? RedirectUrl, DateTimeOffset ExpiresAt, DateTimeOffset CreatedAt, DateTimeOffset? CompletedAt, OnlineReceiptDto? Receipt,
+    string? ProviderReference = null, string? FailureCode = null, bool? IsSandbox = null);
 
 /// <summary>
-/// الدفع الإلكتروني من تطبيق المريض. المبلغ يحسبه السيرفر، ونجاح الدفع يأتي من البوابة فقط (Webhook)، وليس من رجوع التطبيق.
-/// البوابة التجريبية (sandbox) تحاكي البوابة بصفحة فيها زرا "نجاح" و"فشل". الدفع الإلكتروني لا يمر بوردية، وله إيصال online.
+/// الدفع الإلكتروني من تطبيق المريض. المبلغ يحسبه السيرفر، ونجاح الدفع لا يُعتمد إلا من الاستعلام عن حالة المعاملة لدى البوابة
+/// (IPaymentGateway.InquireAsync)، لا من رجوع التطبيق ولا من محتوى الإشعار (3.5-د). البوابة تُختار بالإعداد (mock | live).
+/// الدفع الإلكتروني لا يمر بوردية، وله إيصال online.
 /// </summary>
 public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, NumberSequences numbers,
     SettingsReader settings, FinanceCore finance, BanService bans, MedicalOrderSync orders, PatientPortalService portal, IRealtime realtime,
-    IOptions<OnlinePaymentOptions> options, NotificationService notifications)
+    IOptions<OnlinePaymentOptions> options, NotificationService notifications, PaymentGatewayRegistry gateways)
 {
-    public const string SandboxProvider = "sandbox";
     private OnlinePaymentOptions Options => options.Value;
 
     public async Task<OnlinePaymentDto> CreateAsync(CreateOnlinePaymentRequest req, CancellationToken ct)
@@ -38,8 +39,12 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             .Check(req.Purpose != OnlinePaymentPurposes.Invoice || req.InvoiceId is not null, "invoice_id", "الفاتورة مطلوبة")
             .Check(!string.IsNullOrWhiteSpace(req.Provider), "provider", "البوابة مطلوبة")
             .ThrowIfInvalid();
-        if (!(Options.IsSandbox && req.Provider == SandboxProvider))
-            throw new AppException(422, "PROVIDER_NOT_AVAILABLE", "بوابة الدفع غير متاحة", Options.IsSandbox ? "المتاح حالياً: sandbox" : "لم تُضبط البوابة بعد");
+        var gateway = gateways.Find(req.Provider);
+        if (gateway is null)
+        {
+            var available = gateways.Available().Select(p => p.Code).ToArray();
+            throw new AppException(422, "PROVIDER_NOT_AVAILABLE", "بوابة الدفع غير متاحة", available.Length > 0 ? "المتاح حالياً: " + string.Join(" | ", available) : "لم تُضبط البوابة بعد");
+        }
         await portal.EnsureLinkedAsync(req.PatientId!.Value, ct);
         var id = req.OnlinePaymentId ?? UuidV7.New();
         if (await db.OnlinePayments.AnyAsync(o => o.OnlinePaymentId == id, ct))
@@ -97,9 +102,13 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
         var op = new OnlinePayment
         {
             OnlinePaymentId = id, PatientId = patient.PatientId, PatientAccountId = current.PatientAccountId, Purpose = req.Purpose!,
-            BookingId = bookingId, InvoiceId = invoiceId, InvoiceItemId = invoiceItemId, Provider = SandboxProvider, Amount = amount,
-            RedirectUrl = $"{Options.PublicBaseUrl.TrimEnd('/')}/api/v1/sandbox/pay/{id}", ExpiresAt = now.AddMinutes(Options.ExpiryMinutes), CreatedAt = now,
+            BookingId = bookingId, InvoiceId = invoiceId, InvoiceItemId = invoiceItemId, Provider = gateway.Provider, Amount = amount,
+            ExpiresAt = now.AddMinutes(Options.ExpiryMinutes), CreatedAt = now, IsSandbox = gateway.IsSandbox,
         };
+        // إنشاء المعاملة لدى البوابة مباشرة بعد اختيار الطريقة (الخطوة 2 في 3.5)
+        var created = await gateway.CreateAsync(new GatewayCreateRequest(id, amount, "IQD", $"مجمع الرحمة الطبي - {req.Purpose}", op.ExpiresAt), ct);
+        op.ProviderReference = created.Reference;
+        op.RedirectUrl = created.RedirectUrl;
         db.OnlinePayments.Add(op);
         audit.Add("ONLINE_PAYMENT_CREATED", "online_payment", id, after: new { op.Purpose, op.Amount, op.Provider, op.BookingId, op.InvoiceId, op.InvoiceItemId });
         await db.SaveChangesAsync(ct);
@@ -113,6 +122,9 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
         if (current.IsPatient) await portal.EnsureLinkedAsync(op.PatientId, ct);
         else if (!current.Has(Permissions.ReportsFinance) || !await StaffCanSeeAsync(op, ct))
             throw new AppException(404, "ONLINE_PAYMENT_NOT_FOUND", "عملية الدفع غير موجودة");
+        // مصدر الحقيقة: الاستعلام من البوابة قبل الرد (يشمل نجاحاً متأخراً بعد انتهاء المهلة)
+        if (op.Status is OnlinePaymentStatuses.Pending or OnlinePaymentStatuses.Expired)
+            op = await SyncAsync(op.OnlinePaymentId, ct);
         if (op.Status == OnlinePaymentStatuses.Pending && op.ExpiresAt <= clock.UtcNow)
         {
             op.Status = OnlinePaymentStatuses.Expired;
@@ -141,42 +153,63 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
 
     // ------------------------------------------------------------------ البوابة
 
-    /// <summary>صفحة البوابة التجريبية (بدل صفحة البوابة الحقيقية).</summary>
-    public async Task<string> SandboxPageAsync(Guid onlinePaymentId, CancellationToken ct)
+    public IReadOnlyList<PaymentProviderDto> Providers() => gateways.Available();
+
+    /// <summary>
+    /// يستعلم عن المعاملة لدى البوابة ويطبق النتيجة. هذا الطريق الوحيد لتعليم الدفعة مدفوعة (من التطبيق بعد العودة،
+    /// أو من الإشعار بعد التحقق من توقيعه، أو من المهمة الدورية للمعلّق).
+    /// </summary>
+    public async Task<OnlinePayment> SyncAsync(Guid onlinePaymentId, CancellationToken ct)
     {
-        EnsureSandbox();
-        var op = await db.OnlinePayments.AsNoTracking().FirstOrDefaultAsync(o => o.OnlinePaymentId == onlinePaymentId, ct)
+        var op = await db.OnlinePayments.AsNoTracking().FirstAsync(o => o.OnlinePaymentId == onlinePaymentId, ct);
+        if (op.ProviderReference is null || op.Status is not (OnlinePaymentStatuses.Pending or OnlinePaymentStatuses.Expired)) return await TrackedAsync(op.OnlinePaymentId, ct);
+        var gateway = gateways.Find(op.Provider);
+        if (gateway is null) return await TrackedAsync(op.OnlinePaymentId, ct);
+        var q = await gateway.InquireAsync(op.ProviderReference, ct);
+        return q.Status switch
+        {
+            GatewayStatuses.Paid => await CompleteAsync(op.OnlinePaymentId, GatewayStatuses.Paid, q.TransactionId ?? op.ProviderReference, q.Raw, ct),
+            GatewayStatuses.Failed or GatewayStatuses.Cancelled when op.Status == OnlinePaymentStatuses.Pending =>
+                await CompleteAsync(op.OnlinePaymentId, q.Status, null, q.Raw, ct, q.FailureCode),
+            _ => await TrackedAsync(op.OnlinePaymentId, ct),
+        };
+    }
+
+    private async Task<OnlinePayment> TrackedAsync(Guid id, CancellationToken ct) => await db.OnlinePayments.FirstAsync(o => o.OnlinePaymentId == id, ct);
+
+    /// <summary>للتطبيق بعد العودة من صفحة البوابة: استعلام ثم الحالة.</summary>
+    public Task<OnlinePaymentDto> VerifyAsync(Guid onlinePaymentId, CancellationToken ct) => GetAsync(onlinePaymentId, ct);
+
+    /// <summary>المهمة الدورية: كل معلّق (أو منتهٍ خلال آخر يوم، لنجاح متأخر) يُستعلم عنه لدى البوابة.</summary>
+    public async Task<int> SyncPendingAsync(CancellationToken ct)
+    {
+        var since = clock.UtcNow.AddDays(-1);
+        var ids = await db.OnlinePayments.AsNoTracking()
+            .Where(o => o.ProviderReference != null && (o.Status == OnlinePaymentStatuses.Pending || (o.Status == OnlinePaymentStatuses.Expired && o.ExpiresAt > since)))
+            .OrderBy(o => o.CreatedAt).Select(o => o.OnlinePaymentId).Take(200).ToListAsync(ct);
+        foreach (var id in ids)
+        {
+            try { await SyncAsync(id, ct); } catch (AppException) { /* غير موجودة لدى البوابة: تبقى حتى المهلة */ }
+        }
+        return ids.Count;
+    }
+
+    /// <summary>
+    /// إشعار البوابة (Webhook): لا يُعتمد محتواه. يُقبل فقط بتوقيع صالح (HMAC بسر البوابة)، ويؤدي إلى استعلام رسمي.
+    /// </summary>
+    public async Task<string> WebhookAsync(string provider, string body, string? signature, CancellationToken ct)
+    {
+        var gateway = gateways.Find(provider) ?? throw new AppException(404, "PROVIDER_NOT_AVAILABLE", "مزود الدفع غير مفعّل");
+        var reference = gateway.VerifyCallback(body, signature) ?? throw new AppException(401, "INVALID_SIGNATURE", "توقيع الإشعار غير صالح");
+        var id = await db.OnlinePayments.AsNoTracking().Where(o => o.Provider == provider && o.ProviderReference == reference).Select(o => (Guid?)o.OnlinePaymentId).FirstOrDefaultAsync(ct)
                  ?? throw new AppException(404, "ONLINE_PAYMENT_NOT_FOUND", "عملية الدفع غير موجودة");
-        static string enc(string s) => System.Net.WebUtility.HtmlEncode(s);
-        return $$"""
-            <!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-            <title>بوابة الدفع التجريبية</title>
-            <style>body{font-family:system-ui,sans-serif;max-width:420px;margin:40px auto;padding:0 16px;color:#1f2937}
-            .card{border:1px solid #e5e7eb;border-radius:12px;padding:20px}.amount{font-size:28px;font-weight:700;margin:12px 0}
-            button{width:100%;padding:14px;margin-top:10px;border:0;border-radius:8px;font-size:16px;cursor:pointer}
-            .ok{background:#16a34a;color:#fff}.fail{background:#dc2626;color:#fff}#msg{margin-top:14px;font-weight:600}</style></head>
-            <body><div class="card"><div>بوابة دفع تجريبية (Sandbox) - لا يُخصم أي مبلغ</div>
-            <div class="amount">{{op.Amount:N0}} د.ع</div><div>الحالة: <span id="st">{{enc(op.Status)}}</span></div>
-            <button class="ok" onclick="pay('succeeded')">نجاح الدفع</button><button class="fail" onclick="pay('failed')">فشل الدفع</button>
-            <div id="msg"></div></div>
-            <script>async function pay(r){const res=await fetch(location.pathname,{method:'POST',headers:{'Content-Type':'application/json'},
-            body:JSON.stringify({result:r})});const j=await res.json();document.getElementById('st').textContent=j.status||j.code;
-            document.getElementById('msg').textContent=res.ok?'تم. ارجع إلى التطبيق.':(j.title||'خطأ');}</script></body></html>
-            """;
+        return (await SyncAsync(id, ct)).Status;
     }
 
-    /// <summary>يحاكي الـ Webhook: نتيجة البوابة. Idempotent: العملية المكتملة لا تتغير.</summary>
-    public async Task<OnlinePaymentDto> SandboxCompleteAsync(Guid onlinePaymentId, SandboxPayRequest req, CancellationToken ct)
+    /// <summary>يطبق نتيجة الاستعلام. outcome: paid | failed | cancelled. Idempotent: العملية المكتملة لا تتغير.</summary>
+    private async Task<OnlinePayment> CompleteAsync(Guid onlinePaymentId, string outcome, string? transactionId, string raw, CancellationToken ct, string? failureCode = null)
     {
-        EnsureSandbox();
-        new Validator().Check(req.Result is "succeeded" or "failed", "result", "succeeded | failed").ThrowIfInvalid();
-        var op = await CompleteAsync(onlinePaymentId, req.Result == "succeeded", $"SBX-{onlinePaymentId:N}",
-            JsonSerializer.Serialize(new { provider = SandboxProvider, result = req.Result }), ct);
-        return await ToDtoAsync(op, ct);
-    }
-
-    public async Task<OnlinePayment> CompleteAsync(Guid onlinePaymentId, bool succeeded, string transactionId, string raw, CancellationToken ct)
-    {
+        var succeeded = outcome == GatewayStatuses.Paid;
         await using var tx = await db.BeginTransactionAsync(ct);
         await db.ExecuteAsync($"SELECT 1 FROM online_payments WHERE online_payment_id = {onlinePaymentId} FOR UPDATE", ct);
         var op = await db.OnlinePayments.FirstOrDefaultAsync(o => o.OnlinePaymentId == onlinePaymentId, ct)
@@ -188,8 +221,10 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
         lateSuccess |= succeeded && op.ExpiresAt <= now;
         op.RawCallback = raw;
         op.CompletedAt = now;
-        if (succeeded) await ApplySuccessAsync(op, transactionId, now, ct); // الحجز إن بقي صالحاً يُطبق عليه، وإلا يصبح رصيداً
-        else op.Status = op.ExpiresAt <= now ? OnlinePaymentStatuses.Expired : OnlinePaymentStatuses.Failed;
+        op.FailureCode = succeeded ? null : failureCode;
+        if (succeeded) await ApplySuccessAsync(op, transactionId!, now, ct); // الحجز إن بقي صالحاً يُطبق عليه، وإلا يصبح رصيداً
+        else if (outcome == GatewayStatuses.Cancelled) op.Status = OnlinePaymentStatuses.Cancelled;
+        else op.Status = op.ExpiresAt <= now || failureCode == "TIMEOUT" ? OnlinePaymentStatuses.Expired : OnlinePaymentStatuses.Failed;
         audit.Add("ONLINE_PAYMENT_" + op.Status.ToUpperInvariant(), "online_payment", op.OnlinePaymentId,
             after: new { op.Amount, op.Purpose, transactionId, late = lateSuccess });
         await db.SaveChangesAsync(ct);
@@ -287,11 +322,6 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             """, ct);
     }
 
-    private void EnsureSandbox()
-    {
-        if (!Options.IsSandbox) throw new AppException(404, "NOT_FOUND", "المورد غير موجود");
-    }
-
     private async Task<OnlinePaymentDto> ToDtoAsync(OnlinePayment op, CancellationToken ct)
     {
         OnlineReceiptDto? receipt = null;
@@ -301,6 +331,7 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             receipt = new OnlineReceiptDto(r.ReceiptId, r.ReceiptNumber, finance.QrUrl(r.VerifyCode));
         }
         return new OnlinePaymentDto(op.OnlinePaymentId, op.Purpose, op.PatientId, op.BookingId, op.InvoiceId, op.Amount, op.Status, op.Provider,
-            op.Status == OnlinePaymentStatuses.Pending ? op.RedirectUrl : null, op.ExpiresAt, op.CreatedAt, op.CompletedAt, receipt);
+            op.Status == OnlinePaymentStatuses.Pending ? op.RedirectUrl : null, op.ExpiresAt, op.CreatedAt, op.CompletedAt, receipt,
+            op.ProviderReference, op.FailureCode, current.IsPatient ? null : op.IsSandbox); // علامة «تجريبي» للإدارة فقط
     }
 }

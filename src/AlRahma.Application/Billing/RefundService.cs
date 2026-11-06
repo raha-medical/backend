@@ -20,7 +20,7 @@ public record RefundListQuery(string? Status, int Page = 1, int PageSize = 20);
 /// </summary>
 public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, FinanceCore finance,
     SettingsReader settings, IDrawerTokenIssuer drawer, IRealtime realtime,
-    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications)
+    Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications, PatientApp.Gateways.PaymentGatewayRegistry gateways)
 {
     public const string CashierLimitKey = "refund.cashier_limit";
 
@@ -78,7 +78,9 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         db.Refunds.Add(refund);
         var limit = await settings.GetLongAsync(CashierLimitKey, current.BranchId, 50000, ct);
         string? drawerToken = null;
-        if (isApprover || (refund.Amount <= limit && !methodMismatch))
+        // قرار المالك (أ): الاسترجاع النقدي اليدوي يحتاج دائماً موافقة محاسب الفرع أو المشرف مهما كان المبلغ، والسبب إلزامي.
+        // الحد (refund.cashier_limit) يبقى لغير النقد فقط. الاسترجاع التلقائي بالسياسة (إلغاء الطبيب جدوله) لا يمر من هنا.
+        if (isApprover || (refund.Method != RefundMethods.Cash && refund.Amount <= limit && !methodMismatch))
             drawerToken = await CompleteAsync(refund, item, await ShiftForAsync(refund, null, ct), ct);
         audit.Add("REFUND_REQUESTED", "refund", id, after: new { refund.InvoiceItemId, refund.Amount, refund.Method, refund.Status }, reason: refund.Reason);
         await db.SaveChangesAsync(ct);
@@ -178,7 +180,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         if (refund.Method is not (RefundMethods.Cash or RefundMethods.Pos)) return null;
         if (await finance.OpenShiftOfAsync(current.UserId, ct) is { } mine) return mine;
         if (requester is { } rid && await finance.OpenShiftOfAsync(rid, ct) is { } theirs) return theirs;
-        throw new AppException(409, "NO_OPEN_SHIFT", "لا توجد وردية مفتوحة", "استرجاع النقد أو POS يخرج من درج وردية مفتوحة");
+        throw new AppException(409, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح", "استرجاع النقد أو POS يخرج من حساب يومي مفتوح");
     }
 
     private async Task<string?> CompleteAsync(Refund refund, InvoiceItem item, Shift? shift, CancellationToken ct)
@@ -221,7 +223,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         }
         if (refund.Method == RefundMethods.OnlineReversal)
         {
-            // في البوابة التجريبية يتم العكس فوراً؛ الدفعة الإلكترونية تصبح refunded عند عكس كامل مبلغها
+            // العكس عبر البوابة نفسها (3.5-ح): رفض البوابة يلغي الاسترجاع كله. الدفعة تصبح refunded عند عكس كامل مبلغها
             var online = await db.PaymentAllocations.Where(a => a.InvoiceItemId == item.InvoiceItemId)
                 .Join(db.Payments, a => a.PaymentId, p => p.PaymentId, (a, p) => p.OnlinePaymentId)
                 .Where(x => x != null).Select(x => x!.Value).ToListAsync(ct);
@@ -232,6 +234,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
                     .Join(db.PaymentAllocations, p => p.PaymentId, a => a.PaymentId, (p, a) => a.InvoiceItemId).ToListAsync(ct);
                 var reversed = await db.Refunds.Where(r => itemIds.Contains(r.InvoiceItemId) && r.Method == RefundMethods.OnlineReversal
                     && r.Status == RefundStatuses.Completed && r.RefundId != refund.RefundId).SumAsync(r => (long?)r.Amount, ct) ?? 0;
+                await gateways.RefundAsync(op, Math.Min(refund.Amount, op.Amount - reversed), ct);
                 if (reversed + refund.Amount >= op.Amount) op.Status = OnlinePaymentStatuses.Refunded;
             }
         }
@@ -239,7 +242,7 @@ public class RefundService(IAppDbContext db, ICurrentUser current, IAuditLogger 
         {
             refund.Amount, refund.Method, receipt.ReceiptNumber, refund.DoctorShareAdjustment, refund.ComplexShareAdjustment,
         });
-        return refund.Method == RefundMethods.Cash && shift is not null ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null;
+        return refund.Method == RefundMethods.Cash && shift is not null && drawer.Enabled ? drawer.Issue(receipt.ReceiptNumber, shift.ShiftId, shift.DeviceId) : null;
     }
 
     /// <summary>البند مدفوع (كلياً أو جزئياً) بدفعة إلكترونية من التطبيق.</summary>

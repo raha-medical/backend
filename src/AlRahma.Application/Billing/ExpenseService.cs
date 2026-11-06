@@ -81,7 +81,7 @@ public class ExpenseService(IAppDbContext db, ICurrentUser current, IAuditLogger
         if (tx is not null) await tx.CommitAsync(ct);
 
         var dto = (await ToDtosAsync([expense], ct)).Single();
-        return shift is null ? dto : dto with { DrawerToken = drawer.Issue(expense.ExpenseNumber, shift.ShiftId, shift.DeviceId), OpenDrawer = true };
+        return shift is null || !drawer.Enabled ? dto : dto with { DrawerToken = drawer.Issue(expense.ExpenseNumber, shift.ShiftId, shift.DeviceId), OpenDrawer = true };
     }
 
     public async Task<ExpenseDto> GetAsync(Guid expenseId, CancellationToken ct)
@@ -119,7 +119,7 @@ public class ExpenseService(IAppDbContext db, ICurrentUser current, IAuditLogger
         var x = await LoadAsync(expenseId, ct);
         if (x.Status == ExpenseStatuses.Void) return (await ToDtosAsync([x], ct)).Single();
         if (x.ShiftId is { } sid && !await db.Shifts.AnyAsync(s => s.ShiftId == sid && s.Status == ShiftStatuses.Open, ct))
-            throw new AppException(409, "SHIFT_CLOSED", "لا يُلغى مصروف من وردية مغلقة", "الوردية أُغلقت وحُسب المتوقع في درجها");
+            throw new AppException(409, "SHIFT_CLOSED", "لا يُلغى مصروف من حساب يومي مغلق", "الحساب اليومي أُغلق وحُسب المتوقع فيه");
         x.Status = ExpenseStatuses.Void;
         x.VoidedBy = current.UserId;
         x.VoidedAt = clock.UtcNow;

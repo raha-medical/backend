@@ -15,7 +15,7 @@ public record PrintTender(string Method, long Amount)
 public record PrintPayloadDto(string ReceiptNumber, string Type, string TypeAr, string BranchName, DateTimeOffset IssuedAt, string CashierName,
     string? PatientName, string? FileNumber, IReadOnlyList<PrintLine> Lines, long DepositUsed, IReadOnlyList<PrintTender> Tenders, long Total,
     string QrCode, string Footer, bool IsCopy, int CopyNumber,
-    string? ClinicName = null, string? DoctorName = null, string? TicketNumber = null)
+    string? ClinicName = null, string? DoctorName = null, string? TicketNumber = null, string? LogoUrl = null)
 {
     /// <summary>حقول العرض بتوقيت بغداد؛ issued_at بتوقيت UTC قد يقع في يوم آخر قرب منتصف الليل.</summary>
     public string IssuedDate => ArabicFormat.IsoDate(IssuedAt);
@@ -33,7 +33,7 @@ public record VerifyReceiptDto(bool Valid, string ReceiptNumber, string Type, Da
 }
 
 /// <summary>بيانات طباعة الإيصال، وإعادة الطباعة (بدون فتح الدرج)، والتحقق العام من الـ QR.</summary>
-public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, FinanceCore finance)
+public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, FinanceCore finance, IClock clock)
 {
     private static readonly IReadOnlyDictionary<string, string> TypeNames = new Dictionary<string, string>
     {
@@ -99,7 +99,8 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
         return new PrintPayloadDto(r.ReceiptNumber, r.Type, TypeNames[r.Type], $"{finance.Options.ComplexName} - {branch}", r.IssuedAt, cashier,
             patient?.FullName, patient?.FileNumber, lines, depositUsed, tenders, r.Total, finance.QrUrl(r.VerifyCode),
             copyNumber > 1 ? $"نسخة مكررة ({copyNumber}) - {finance.Options.Footer}" : finance.Options.Footer, copyNumber > 1, copyNumber,
-            clinic, doctors.Count == 1 ? doctors[0] : null, tickets.Count == 1 ? tickets[0] : null);
+            clinic, doctors.Count == 1 ? doctors[0] : null, tickets.Count == 1 ? tickets[0] : null,
+            string.IsNullOrWhiteSpace(finance.Options.LogoUrl) ? null : finance.Options.LogoUrl);
     }
 
     /// <summary>إيصالات وردية (الافتراضي ورديتي المفتوحة)، الأحدث أولاً، لإعادة طباعة نسخة.</summary>
@@ -107,14 +108,14 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
     {
         var id = shiftId ?? await db.Shifts.Where(s => s.UserId == current.UserId && s.Status == ShiftStatuses.Open)
             .Select(s => (Guid?)s.ShiftId).FirstOrDefaultAsync(ct)
-            ?? throw new AppException(404, "NO_OPEN_SHIFT", "لا توجد وردية مفتوحة");
+            ?? throw new AppException(404, "NO_OPEN_SHIFT", "لا يوجد حساب يومي مفتوح");
         var shift = await db.Shifts.AsNoTracking().FirstOrDefaultAsync(s => s.ShiftId == id, ct)
-                    ?? throw new AppException(404, "SHIFT_NOT_FOUND", "الوردية غير موجودة");
+                    ?? throw new AppException(404, "SHIFT_NOT_FOUND", "الحساب اليومي غير موجود");
         var reviewer = current.Has(Permissions.ShiftsReview) || current.Has(Permissions.RefundsApprove);
         // عزل الفروع: المراجع يرى ورديات فرعه الحالي فقط (المدير العام كل الفروع)
         if (shift.UserId != current.UserId && current.Role != Roles.Admin && shift.BranchId != current.BranchId)
-            throw new AppException(404, "SHIFT_NOT_FOUND", "الوردية غير موجودة");
-        if (shift.UserId != current.UserId && !reviewer) throw new AppException(403, "FORBIDDEN", "ليست ورديتك");
+            throw new AppException(404, "SHIFT_NOT_FOUND", "الحساب اليومي غير موجود");
+        if (shift.UserId != current.UserId && !reviewer) throw new AppException(403, "FORBIDDEN", "ليس حسابك اليومي");
         var rows = await (from r in db.Receipts.AsNoTracking()
                           where r.ShiftId == id
                           join p in db.Patients on r.PatientId equals p.PatientId into pj
@@ -141,6 +142,22 @@ public class ReceiptService(IAppDbContext db, ICurrentUser current, IAuditLogger
                 x.Name, x.File, One(m.Select(z => z.Doctor)), One(m.Select(z => z.Ticket)), x.r.ReprintCount, reviewer || x.r.ReprintCount < 1,
                 $"/receipts/{x.r.ReceiptId}/print-payload");
         }).ToList();
+    }
+
+    /// <summary>
+    /// الحساب اليومي: الوكيل أو المتصفح طبع الوصل فعلاً. يُسجَّل أول مرة فقط، ويمسح سبب «غير مطبوع» إن وُجد.
+    /// غير المطبوع يحتاج سبباً عند إغلاق الحساب، ويظهر لمحاسب الفرع.
+    /// </summary>
+    public async Task MarkPrintedAsync(Guid receiptId, CancellationToken ct)
+    {
+        var r = await LoadAsync(receiptId, ct);
+        var owner = r.IssuedBy == current.UserId
+                    || (r.ShiftId is { } sid && await db.Shifts.AnyAsync(s => s.ShiftId == sid && s.UserId == current.UserId, ct));
+        if (!owner && !current.Has(Permissions.ShiftsReview)) throw AppException.Forbidden("يسجّل الطباعة صاحب الوصل فقط");
+        if (r.PrintedAt is not null) return;
+        r.PrintedAt = clock.UtcNow;
+        r.UnprintedReason = null;
+        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>نسخة مكررة: لا تفتح الدرج، وتُسجل في التدقيق. الاستقبال مرة واحدة، والمحاسب بلا حد.</summary>

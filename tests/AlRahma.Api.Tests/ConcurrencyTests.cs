@@ -72,6 +72,12 @@ public class ConcurrencyTests(TestApp app)
         var close = Api.PostAsync(s.Reception, $"/api/v1/shifts/{shiftId}/close",
             new { declared = new { cash = 35000, pos_slips_count = 0, pos_total = 0 } }, Guid.NewGuid());
         var (p, c) = (await pay, await close);
+        if (c.Status == 422 && c.Code == "UNPRINTED_RECEIPTS") // الدفع سبق الإغلاق: الوصل لم يُطبع بعد، فيُذكر السبب
+        {
+            var reasons = c.Body!["unprinted_receipts"]!.AsArray().ToDictionary(r => r!["receipt_id"]!.GetValue<string>(), _ => "تزامن الاختبار");
+            c = await Api.PostAsync(s.Reception, $"/api/v1/shifts/{shiftId}/close",
+                new { declared = new { cash = 35000, pos_slips_count = 0, pos_total = 0 }, unprinted_reasons = reasons }, Guid.NewGuid());
+        }
         Assert.True(c.Status == 200, c.Raw);
 
         // الثابت: المتوقع في الدرج = الفكة + كل نقد دخل هذه الوردية، سواء سبق الدفع الإغلاق أو رُفض بعده

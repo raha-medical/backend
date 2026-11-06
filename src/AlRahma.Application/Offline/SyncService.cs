@@ -244,7 +244,7 @@ public class SyncService(IAppDbContext db, ICurrentUser current, IAuditLogger au
                 var r = await payments.CollectAsync(body with { CreatedOfflineAt = body.CreatedOfflineAt ?? occurredAt }, ct,
                     new OfflineContext(device.DeviceId, occurredAt, ticket, shiftId));
                 if (await shifts.ApplyLatePaymentAsync(r.ShiftId, r.PaymentId, ct))
-                    warnings.Add(new SyncWarning("LATE_PAYMENT_CLOSED_SHIFT", body.PatientId, "الوردية أُغلقت قبل المزامنة؛ أُعيدت مطابقتها ونُبّه المحاسب"));
+                    warnings.Add(new SyncWarning("LATE_PAYMENT_CLOSED_SHIFT", body.PatientId, "الحساب اليومي أُغلق قبل المزامنة؛ أُعيدت مطابقته ونُبّه المحاسب"));
                 var mismatch = await db.Payments.Where(p => p.PaymentId == r.PaymentId).Select(p => p.PriceMismatch).FirstAsync(ct);
                 if (mismatch) warnings.Add(new SyncWarning("PRICE_MISMATCH", body.PatientId));
                 return (new() { ["payment_id"] = r.PaymentId, ["receipt_id"] = r.Receipt.ReceiptId, ["receipt_number"] = r.Receipt.ReceiptNumber }, warnings);

@@ -421,9 +421,9 @@ public class Phase3BookingTests(TestApp app)
         async Task<Guid> PaidBookingAsync(DateOnly day)
         {
             var booking = await BookAsync(me, patient, await SessionAsync(s, day));
-            var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = booking, provider = "sandbox" }, Guid.NewGuid());
+            var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = booking, provider = "zaincash" }, Guid.NewGuid());
             Assert.True(op.Status == 201, op.Raw);
-            var done = await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{Id(op.Body, "online_payment_id")}", new { result = "succeeded" });
+            var done = await MockPay.SucceedAsync(me, Id(op.Body, "online_payment_id"));
             Assert.True(done.Status == 200, done.Raw);
             return booking;
         }
@@ -463,8 +463,8 @@ public class Phase3BookingTests(TestApp app)
         var d3 = await SessionAsync(s, Today.AddDays(3));
         var d4 = await SessionAsync(s, Today.AddDays(4));
         var booking = await BookAsync(me, patient, d2);
-        var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = booking, provider = "sandbox" }, Guid.NewGuid());
-        await Api.PostAsync(app.Client(), $"/api/v1/sandbox/pay/{Id(op.Body, "online_payment_id")}", new { result = "succeeded" });
+        var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = booking, provider = "zaincash" }, Guid.NewGuid());
+        await MockPay.SucceedAsync(me, Id(op.Body, "online_payment_id"));
 
         var policyOnly = await Api.GetAsync(me, $"/api/v1/bookings/{booking}/reschedule-preview");
         Assert.True(policyOnly.Status == 200, policyOnly.Raw);

@@ -182,6 +182,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         booking.CheckInMethod = ctx?.Method ?? CheckInMethods.Reception;
         ticket.Status = TicketStatuses.Arrived;
         ticket.ArrivedAt = now;
+        ticket.CheckedInBy = current.StaffUserId; // الحساب اليومي: الإلكتروني وغير الدافعين لمن أكّدتُ حضورهم
         var service = await engine.ConsultationServiceAsync(booking.Session.ClinicId, booking.VisitKind, ct);
         var prepaid = booking.PaymentStatus == PaymentStatuses.Paid;
         var invoice = await engine.CreateConsultationInvoiceAsync(ticket, doctor, service, booking.VisitKind,
@@ -399,6 +400,7 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             Status = TicketStatuses.Arrived,
             ArrivedAt = now,
             CreatedBy = current.UserId,
+            CheckedInBy = current.StaffUserId,
             CreatedOfflineAt = req.CreatedOfflineAt,
             CreatedAt = now,
             IsExtra = isExtra,
@@ -733,16 +735,31 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         else
         {
             ticket.Status = TicketStatuses.NoShow;
+            var prepaidCredit = false;
             if (ticket.BookingId is { } bid)
             {
                 var booking = await db.Bookings.FirstAsync(b => b.BookingId == bid, ct);
+                var wasBooked = booking.Status == BookingStatuses.Booked;
                 booking.Status = BookingStatuses.NoShow;
                 booking.CountedAsNoShow = true;
+                // 5.2-ب (قرار المالك): دفع إلكترونياً ولم يحضر = المبلغ رصيد في محفظته، لا استرجاع نقدي، ولا حظر تلقائي (كالمهمة الدورية)
+                var prepaid = wasBooked ? await db.OnlinePayments.Where(o => o.BookingId == bid && o.Purpose == OnlinePaymentPurposes.BookingFull
+                        && o.Status == OnlinePaymentStatuses.Succeeded).Select(o => new { o.OnlinePaymentId, o.Amount }).FirstOrDefaultAsync(ct) : null;
+                if (prepaid is not null && !await db.PatientCredits.AnyAsync(c => c.BookingId == bid && c.OnlinePaymentId == prepaid.OnlinePaymentId, ct))
+                {
+                    booking.CountedAsNoShow = false;
+                    prepaidCredit = true;
+                    db.PatientCredits.Add(new PatientCreditEntry
+                    {
+                        EntryId = UuidV7.New(), PatientId = booking.PatientId, BranchId = ticket.BranchId, Amount = prepaid.Amount,
+                        Kind = "booking_cancel_credit", BookingId = bid, OnlinePaymentId = prepaid.OnlinePaymentId, CreatedBy = current.StaffUserId, CreatedAt = clock.UtcNow,
+                    });
+                }
             }
             await VoidUnpaidConsultationAsync(ticket, "غياب المريض", ct);
             var patient = await db.Patients.FirstAsync(p => p.PatientId == ticket.PatientId, ct);
-            audit.Add("TICKET_NO_SHOW", "queue_ticket", ticket.TicketId);
-            banned = await bans.RecordNoShowAsync(patient, ticket.TicketId, ticket.BookingId, ct);
+            audit.Add("TICKET_NO_SHOW", "queue_ticket", ticket.TicketId, after: new { prepaid_to_credit = prepaidCredit });
+            if (!prepaidCredit) banned = await bans.RecordNoShowAsync(patient, ticket.TicketId, ticket.BookingId, ct);
         }
         await db.SaveChangesAsync(ct);
         await engine.RecalculateAsync(session, ct);

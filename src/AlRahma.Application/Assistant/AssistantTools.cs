@@ -86,14 +86,13 @@ public class AssistantTools(IAppDbContext db, IClock clock, PatientPortalService
             },
             required = new[] { "doctor_id" },
         }),
-        new("propose_booking", "يجهز اقتراح حجز لوجبة متاحة ليؤكده المراجع بزر في التطبيق. لا يحجز.", new
+        new("propose_booking", "يجهز اقتراح حجز لوجبة متاحة ليؤكده المراجع بزر في التطبيق. لا يحجز. نوع الزيارة (جديد أو مراجعة) يحدده النظام تلقائياً.", new
         {
             type = "object",
             properties = new
             {
                 session_id = new { type = "string", description = "من get_doctor_availability" },
                 patient_id = new { type = "string", description = "فرد الحساب المطلوب الحجز له. اختياري إذا كان واحداً أو مختاراً." },
-                visit_kind = new { type = "string", @enum = new[] { "auto", "new_visit", "follow_up" } },
             },
             required = new[] { "session_id" },
         }),
@@ -124,7 +123,7 @@ public class AssistantTools(IAppDbContext db, IClock clock, PatientPortalService
                 "list_specialties" => await SpecialtiesAsync(Str(args, "branch"), ct),
                 "find_doctors" => await DoctorsAsync(Str(args, "specialty"), Str(args, "name"), Str(args, "branch"), ct),
                 "get_doctor_availability" => await AvailabilityAsync(Str(args, "doctor_id"), Str(args, "from"), Int(args, "days"), ct),
-                "propose_booking" => await ProposeAsync(Str(args, "session_id"), Str(args, "patient_id"), Str(args, "visit_kind"), defaultPatient, ct),
+                "propose_booking" => await ProposeAsync(Str(args, "session_id"), Str(args, "patient_id"), defaultPatient, ct),
                 "search_faq" => await FaqAsync(Str(args, "query"), ct),
                 "get_payment_methods" => PaymentMethods(),
                 _ => throw new NotFound(),
@@ -328,7 +327,7 @@ public class AssistantTools(IAppDbContext db, IClock clock, PatientPortalService
     /// اقتراح فقط: يتحقق أن الفرد من الحساب وأن الوجبة مفتوحة وفيها مقاعد، ويحجز booking_id جديداً للتطبيق (يُستخدم لإحصاء التأكيدات).
     /// لا يُنشئ حجزاً ولا يغير أي شيء في الوجبة.
     /// </summary>
-    private async Task<object> ProposeAsync(string? sessionId, string? patientId, string? visitKind, Guid? defaultPatient, CancellationToken ct)
+    private async Task<object> ProposeAsync(string? sessionId, string? patientId, Guid? defaultPatient, CancellationToken ct)
     {
         if (!Guid.TryParse(sessionId, out var sid)) throw new NotFound();
         var members = await portal.MyPatientsAsync(portal.AccountId, ct);
@@ -350,7 +349,8 @@ public class AssistantTools(IAppDbContext db, IClock clock, PatientPortalService
         if (day is null || day.Status != SessionStatuses.Open || day.OnlineRemaining <= 0)
             return new { error = "session_not_available", status = day?.Status ?? SessionStatuses.Closed };
         var doctor = (await bookings.PublicDoctorsAsync(s.BranchId, null, null, ct)).FirstOrDefault(x => x.DoctorId == s.DoctorId);
-        var kind = visitKind is VisitKinds.NewVisit or VisitKinds.FollowUp ? visitKind : "auto";
+        // المراجع لا يحدد نوع الزيارة (POST /bookings يرفضه بـ 403): النظام يحسبه من آخر زيارة عند نفس الطبيب
+        const string kind = "auto";
         var first = AssistantSafety.FirstName(members.First(m => m.PatientId == patient).FullName);
 
         var bookingId = UuidV7.New();

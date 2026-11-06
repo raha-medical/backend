@@ -744,10 +744,11 @@ public class QaDefectsAndPhase4Tests(TestApp app)
             Assert.Contains("not_found", hijack.ToolResults[0]);
         }
 
+        Assert.Equal("auto", S(proposal, "visit_kind")); // POST /bookings يرفض نوع زيارة يحدده المراجع
         // التأكيد: التطبيق نفسه يرسل POST /bookings بنفس booking_id
         var confirm = await Api.PostAsync(me, "/api/v1/bookings", new
         {
-            booking_id = Id(proposal, "booking_id"), patient_id = patient, session_id = session, visit_kind = S(proposal, "visit_kind"),
+            booking_id = Id(proposal, "booking_id"), patient_id = patient, session_id = session, visit_kind = S(proposal, "visit_kind"), // دائماً auto: المراجع لا يحدد نوع الزيارة
         }, Guid.NewGuid());
         Assert.True(confirm.Status == 201, confirm.Raw);
         Assert.Equal(1, await app.ScalarAsync<int>(bookings));
@@ -944,7 +945,40 @@ public class QaDefectsAndPhase4Tests(TestApp app)
     }
 
     private static GeminiAssistantProvider Gemini(HttpMessageHandler handler) => new(
-        Options.Create(new AssistantOptions { Provider = "gemini", ApiKey = "secret-key-123", Model = "test-model" }), new HttpClient(handler));
+        Options.Create(new AssistantOptions { Provider = "gemini", ApiKey = "secret-key-123", Model = "test-model", RateLimitRetrySeconds = 0 }), new HttpClient(handler));
+
+    /// <summary>يرد بالترتيب من القائمة، ويحفظ كل جسم مرسل.</summary>
+    private sealed class SequenceHandler(params (HttpStatusCode Status, string Body)[] replies) : HttpMessageHandler
+    {
+        public readonly List<string> Sent = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            Sent.Add(await request.Content!.ReadAsStringAsync(ct));
+            var (status, body) = replies[Math.Min(Sent.Count - 1, replies.Length - 1)];
+            return new HttpResponseMessage(status) { Content = new StringContent(body) };
+        }
+    }
+
+    [Fact]
+    public async Task Gemini_provider_retries_without_thinking_level_and_once_when_google_is_busy()
+    {
+        const string ok = """{"candidates":[{"content":{"parts":[{"text":"هلا"}]}}]}""";
+        var empty = new AssistantProviderRequest("s", [], [new AssistantContent("user", "هلا")]);
+        // gemini-3.8-flash يرفض thinkingLevel=minimal بـ 400: محاولة ثانية بلا إعداد التفكير
+        var thinking = new SequenceHandler((HttpStatusCode.BadRequest, "Thinking level MINIMAL is not supported"), (HttpStatusCode.OK, ok));
+        Assert.Equal("هلا", (await Gemini(thinking).GenerateAsync(empty, default)).Text);
+        Assert.Equal(2, thinking.Sent.Count);
+        Assert.NotNull(JsonNode.Parse(thinking.Sent[0])!["generationConfig"]!["thinkingConfig"]);
+        Assert.Null(JsonNode.Parse(thinking.Sent[1])!["generationConfig"]!["thinkingConfig"]);
+        // 503 «ضغط مؤقت»: محاولة ثانية واحدة
+        var busy = new SequenceHandler((HttpStatusCode.ServiceUnavailable, "high demand"), (HttpStatusCode.OK, ok));
+        Assert.Equal("هلا", (await Gemini(busy).GenerateAsync(empty, default)).Text);
+        Assert.Equal(2, busy.Sent.Count);
+        // مفتاح خاطئ (400 دائماً): محاولتان فقط ثم auth
+        var bad = new SequenceHandler((HttpStatusCode.BadRequest, "API key not valid"));
+        Assert.Equal("auth", (await Assert.ThrowsAsync<AssistantProviderException>(() => Gemini(bad).GenerateAsync(empty, default))).ErrorType);
+        Assert.Equal(2, bad.Sent.Count);
+    }
 
     [Fact]
     public async Task Gemini_provider_maps_tools_keeps_the_key_out_of_the_url_and_hides_errors()
@@ -1023,6 +1057,8 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         Assert.True(AssistantSafety.IsEmergency("نزيف قوي"));
         Assert.False(AssistantSafety.IsEmergency("شوكت موعدي"));
         Assert.True(AssistantSafety.IsEmergency("ابني وكع وصارت ضربة راس"));
+        Assert.True(AssistantSafety.IsEmergency("ابني بلع مادة كيميائية"));
+        Assert.True(AssistantSafety.IsEmergency("بنتي شربت كلوركس"));
         Assert.True(AssistantSafety.IsEmergency("انحرگت ايدي بالماي الحار"));
         Assert.True(AssistantSafety.IsEmergency("طفلي حرارته ٤٠ وهو رضيع"));
         Assert.True(AssistantSafety.IsEmergency("صارت عنده حساسية وتورم"));

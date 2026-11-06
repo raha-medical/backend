@@ -18,22 +18,35 @@ public class GeminiAssistantProvider(IOptions<AssistantOptions> options, HttpCli
     public bool IsSandbox => false;
     public bool SupportsAudio => true;
 
-    /// <summary>429 (حد الطلبات في الدقيقة): محاولة ثانية واحدة بعد انتظار قصير، ثم الخطأ المصنف.</summary>
+    /// <summary>
+    /// محاولة ثانية واحدة لكل حالة: 429 أو 503 (ضغط مؤقت عند Google) بعد انتظار قصير، و400 مع thinkingLevel
+    /// بلا إعداد التفكير (بعض النماذج مثل gemini-3.8-flash لا تقبل minimal). بعدها الخطأ المصنف.
+    /// </summary>
     public async Task<AssistantProviderReply> GenerateAsync(AssistantProviderRequest request, CancellationToken ct)
     {
-        try { return await SendOnceAsync(request, ct); }
-        catch (AssistantProviderException e) when (e.ErrorType == "rate_limited")
+        var thinking = Opt.ThinkingLevel;
+        bool retriedThinking = false, retriedBusy = false;
+        while (true)
         {
-            await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(Opt.RateLimitRetrySeconds, 0, 10)), ct);
-            return await SendOnceAsync(request, ct);
+            try { return await SendOnceAsync(request, thinking, ct); }
+            catch (AssistantProviderException e) when (e.HttpStatus == 400 && !string.IsNullOrWhiteSpace(thinking) && !retriedThinking)
+            {
+                retriedThinking = true;
+                thinking = null;
+            }
+            catch (AssistantProviderException e) when ((e.ErrorType == "rate_limited" || e.HttpStatus == 503) && !retriedBusy)
+            {
+                retriedBusy = true;
+                await Task.Delay(TimeSpan.FromSeconds(Math.Clamp(Opt.RateLimitRetrySeconds, 0, 10)), ct);
+            }
         }
     }
 
-    private async Task<AssistantProviderReply> SendOnceAsync(AssistantProviderRequest request, CancellationToken ct)
+    private async Task<AssistantProviderReply> SendOnceAsync(AssistantProviderRequest request, string? thinkingLevel, CancellationToken ct)
     {
         using var message = new HttpRequestMessage(HttpMethod.Post, $"{Opt.BaseUrl.TrimEnd('/')}/models/{Uri.EscapeDataString(Opt.Model)}:generateContent")
         {
-            Content = JsonContent.Create(BuildBody(request)),
+            Content = JsonContent.Create(BuildBody(request, thinkingLevel)),
         };
         message.Headers.Add("x-goog-api-key", Opt.ApiKey);
         HttpResponseMessage response;

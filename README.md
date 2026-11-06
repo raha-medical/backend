@@ -1,6 +1,13 @@
 # نظام مجمع الرحمة الطبي - الباك إند
 
-ASP.NET Core 8 + PostgreSQL 16. المرجع الكامل للـ API في [`docs/api_contracts_v5.md`](docs/api_contracts_v5.md)،
+## التشغيل لأول مرة
+1. المتطلبات: .NET 8 SDK، PostgreSQL 16، Node.js 20، والمستودعات الثلاثة (backend, frontend, dock) على الفرع `staging` في مجلد واحد مع `start-native.bat` و`pg-env.bat`.
+2. انسخ `.env.example` إلى `.env` (وكلمة مرور PostgreSQL في `local-env.bat` بجانب المستودعات).
+3. `setup-db.bat alrahma_staging`: ينشئ قاعدة فارغة ويطبّق المخطط وكل الترحيلات ثم البيانات التجريبية.
+4. `..\start-native.bat`: يشغّل الخادم (8089) والواجهة (3001) والتخزين.
+5. الحسابات: [`dock/docs/handoff/accounts.md`](../dock/docs/handoff/accounts.md)، والعقود: [`docs/api_contracts.md`](docs/api_contracts.md).
+
+ASP.NET Core 8 + PostgreSQL 16. المرجع الكامل للـ API في [`docs/api_contracts.md`](docs/api_contracts.md)،
 وقاعدة البيانات في [`database/schema_v5.sql`](database/schema_v5.sql).
 
 ## البنية

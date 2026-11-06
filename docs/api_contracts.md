@@ -1,3 +1,62 @@
+# عقود الـ API - v6
+
+**الإصدار:** v6 · **آخر commit:** `6915288` (backend، الفرع staging) · **التاريخ:** 2026-11-06
+هذا ملف العقود الوحيد في المستودعات الثلاثة. القسم الأول يلخّص ما تغيّر منذ الوسم `v1.0-stable` (من `git diff v1.0-stable..staging` على الـ Controllers)، وبعده نص v5 الكامل.
+
+## تغييرات v6 منذ v1.0-stable
+
+### نقاط جديدة
+| الطريقة | المسار | الـ Controller |
+| --- | --- | --- |
+| `DELETE` | `/api/v1/faq-items/{faqId:guid}` | SupportController |
+| `GET` | `/api/v1/exchange-rates` | CurrencyController |
+| `GET` | `/api/v1/faq-items` | SupportController |
+| `GET` | `/api/v1/files` | FilesController |
+| `GET` | `/api/v1/me/bookings/{bookingId:guid}/cancellation-options` | BookingsController |
+| `GET` | `/api/v1/me/support-requests` | SupportController |
+| `GET` | `/api/v1/mock-gateway/{reference}` | PatientAppController |
+| `GET` | `/api/v1/online-payments/providers` | PatientAppController |
+| `GET` | `/api/v1/pharmacy/dispense-log` | ClinicalController |
+| `GET` | `/api/v1/pharmacy/prescriptions/{prescriptionId:guid}/bill` | ClinicalController |
+| `GET` | `/api/v1/public/contacts` | SupportController |
+| `GET` | `/api/v1/public/faq` | SupportController |
+| `GET` | `/api/v1/reports/stats` | ReportsController |
+| `GET` | `/api/v1/shifts/awaiting-acknowledgement` | ShiftsController |
+| `GET` | `/api/v1/shifts/liabilities` | ShiftsController |
+| `GET` | `/api/v1/support-requests` | SupportController |
+| `PATCH` | `/api/v1/faq-items/{faqId:guid}` | SupportController |
+| `POST` | `/api/v1/faq-items` | SupportController |
+| `POST` | `/api/v1/me/bookings/{bookingId:guid}/cancellation-choice` | BookingsController |
+| `POST` | `/api/v1/me/support-requests` | SupportController |
+| `POST` | `/api/v1/mock-gateway/{reference}/cancel` | PatientAppController |
+| `POST` | `/api/v1/mock-gateway/{reference}/credentials` | PatientAppController |
+| `POST` | `/api/v1/mock-gateway/{reference}/otp` | PatientAppController |
+| `POST` | `/api/v1/mock-gateway/{reference}/otp/resend` | PatientAppController |
+| `POST` | `/api/v1/online-payments/{onlinePaymentId:guid}/verify` | PatientAppController |
+| `POST` | `/api/v1/pharmacy/external-sales` | ClinicalController |
+| `POST` | `/api/v1/pharmacy/external-sales/{invoiceId:guid}/deliver` | ClinicalController |
+| `POST` | `/api/v1/pharmacy/prescriptions/{prescriptionId:guid}/bill` | ClinicalController |
+| `POST` | `/api/v1/queue/tickets/{ticketId:guid}/returned` | QueueController |
+| `POST` | `/api/v1/receipts/{receiptId:guid}/printed` | BillingController |
+| `POST` | `/api/v1/support-requests/{id:guid}/reply` | SupportController |
+| `PUT` | `/api/v1/exchange-rates` | CurrencyController |
+
+### نقاط عُدّلت
+| النقطة | التغيير |
+| --- | --- |
+| `GET /reports/stats` | `from`, `to` (افتراضي آخر 30 يوماً، 366 كحد أقصى)، `branch_id`. صلاحية `reports.finance` ونطاق فروع المستخدم. الرد: `totals`, `previous_totals`, `days[]` (revenue, refunds, visits, bookings, cancelled, no_shows, new_patients, collected_iqd, collected_usd)، `departments[]`, `methods[]` (cash, pos, online, cash_usd)، `branches[]`, `top_doctors[]`, `weekdays[]`، و`currency`/`previous_currency` (`iqd`, `usd`, `usd_as_iqd`): الدينار والدولار منفصلان |
+| `GET /reports/branches-overview` | حقول جديدة لكل فرع وللمجموع: `queue_now`, `revenue_today_usd`, `revenue_today_usd_iqd`, `online_bookings_today`, `refunds_today`, `refunds_today_amount`, `open_shifts`, `shifts_pending_review` |
+| `POST /branches` | **كسر:** `latitude` و`longitude` إلزاميان (400 على `latitude`)، والاسم لا يتكرر (400 على `name` أو `name_en`، بلا فرق في الأحرف والمسافات، ويشمل الفروع الموقوفة). حقل جديد اختياري `name_en` (الترحيل 024). للمدير العام فقط |
+| `PATCH /branches/{id}` | تغيير `latitude`/`longitude` للمدير العام فقط (403 لغيره حتى مع `branches.edit`). `name_en` جديد والتكرار 400. `is_active` (الإيقاف) للمدير العام فقط. لا توجد نقطة حذف للفروع |
+| `GET /branches`, `GET /branches/{id}` | حقل جديد `name_en` |
+| الدفع الإلكتروني | `GET/POST /sandbox/pay/{onlinePaymentId}` **أُزيلتا** واستُبدلتا ببوابة المحاكاة `/mock-gateway/{reference}` و`POST /online-payments/{id}/verify` و`GET /online-payments/providers` |
+| الدولار | `GET/PUT /exchange-rates` (سعر صرف اليوم لكل فرع)، وطريقة الدفع `cash_usd` في التحصيل والاسترجاع والحساب اليومي (الترحيل 023) |
+
+### الترحيلات منذ v1.0-stable
+021 الدعم وخيارات المراجع، 022 فوترة الصيدلية، 023 الدينار والدولار، 024 الاسم الإنجليزي للفرع.
+
+---
+
 # 🔌 عقود الـ APIs - نظام مجمع الرحمة الطبي
 
 **Al-Rahma Medical Complex - Enterprise API Contracts (v5.0)**

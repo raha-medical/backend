@@ -77,6 +77,16 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         var day = date ?? clock.BaghdadToday();
         if (day >= clock.BaghdadToday()) await doctors.EnsureSessionsAsync(doctor.DoctorId, day, day, ct);
         var session = await reader.CurrentSessionAsync(doctor.DoctorId, day, ct);
+        // The doctor-wide room guard includes previous sessions; expose the same unfinished visit.
+        // Do not change session selection for check-in, scheduling, or reception.
+        if (current.Role == Roles.Doctor && day == clock.BaghdadToday())
+        {
+            var activeSession = await db.QueueTickets.AsNoTracking()
+                .Where(t => t.DoctorId == doctorId && t.Status == TicketStatuses.InRoom)
+                .OrderBy(t => t.StartedAt).Select(t => (Guid?)t.SessionId).FirstOrDefaultAsync(ct);
+            if (activeSession is { } active)
+                session = await db.DoctorSessions.AsNoTracking().FirstAsync(s => s.SessionId == active, ct);
+        }
         return session is null ? null : await reader.LiveAsync(session, ct);
     }
 
@@ -698,6 +708,18 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
                    ?? throw new AppException(404, "QUEUE_EMPTY", "لا يوجد مريض جاهز (واصل ومدفوع) في الانتظار");
         return await CallCoreAsync(next.TicketId, ct);
     }
+
+    public Task<TicketActionResponse> ConfirmPresenceAsync(Guid ticketId, CancellationToken ct) =>
+        LockedAsync(ticketId, async () =>
+        {
+            var (ticket, session, _) = await LoadTicketAsync(ticketId, ct);
+            if (ticket.Status != TicketStatuses.Called) throw InvalidTransition(ticket, "تأكيد الحضور");
+            ticket.CallAcknowledgedAt ??= op.Now;
+            audit.Add("TICKET_PRESENCE_CONFIRMED", "queue_ticket", ticketId);
+            await db.SaveChangesAsync(ct);
+            await notifier.SessionChangedAsync(session.SessionId, ct);
+            return ToAction(ticket);
+        }, ct);
 
     public Task<TicketActionResponse> StartAsync(Guid ticketId, CancellationToken ct) => LockedAsync(ticketId, () => StartCoreAsync(ticketId, ct), ct);
 

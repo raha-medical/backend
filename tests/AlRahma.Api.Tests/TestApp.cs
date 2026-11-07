@@ -25,6 +25,7 @@ public sealed class TestApp : IAsyncLifetime
 
     public static string? ServerUrl => Environment.GetEnvironmentVariable("TEST_DATABASE_URL");
 
+    private readonly bool _schemaOnly = Environment.GetEnvironmentVariable("TEST_SCHEMA_ONLY") == "1";
     private readonly string _dbName = $"alrahma_test_{Guid.NewGuid():N}";
     private WebApplicationFactory<Program>? _factory;
 
@@ -41,15 +42,22 @@ public sealed class TestApp : IAsyncLifetime
     {
         if (ServerUrl is null) return;
 
-        await using (var admin = new NpgsqlConnection(ServerUrl))
+        if (_schemaOnly && new NpgsqlConnectionStringBuilder(ServerUrl).Database != "alrahma_staging")
+            throw new InvalidOperationException("Schema tests must use alrahma_staging");
+        if (!_schemaOnly) await using (var admin = new NpgsqlConnection(ServerUrl))
         {
             await admin.OpenAsync();
             await using var create = new NpgsqlCommand($"CREATE DATABASE {_dbName}", admin);
             await create.ExecuteNonQueryAsync();
         }
 
-        ConnectionString = new NpgsqlConnectionStringBuilder(ServerUrl) { Database = _dbName, Pooling = false }.ConnectionString;
+        ConnectionString = _schemaOnly
+            ? new NpgsqlConnectionStringBuilder(ServerUrl) { SearchPath = _dbName, Pooling = false }.ConnectionString
+            : new NpgsqlConnectionStringBuilder(ServerUrl) { Database = _dbName, Pooling = false }.ConnectionString;
         var schema = await File.ReadAllTextAsync(FindRepoFile("database/schema_v5.sql"));
+        if (_schemaOnly)
+            schema = schema.Replace("DROP SCHEMA IF EXISTS public CASCADE;", $"DROP SCHEMA IF EXISTS {_dbName} CASCADE;")
+                .Replace("CREATE SCHEMA public;", $"CREATE SCHEMA {_dbName};");
         await ExecAsync(schema);
 
         _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
@@ -91,7 +99,7 @@ public sealed class TestApp : IAsyncLifetime
         NpgsqlConnection.ClearAllPools();
         await using var admin = new NpgsqlConnection(ServerUrl);
         await admin.OpenAsync();
-        await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS {_dbName} WITH (FORCE)", admin);
+        await using var drop = new NpgsqlCommand(_schemaOnly ? $"DROP SCHEMA IF EXISTS {_dbName} CASCADE" : $"DROP DATABASE IF EXISTS {_dbName} WITH (FORCE)", admin);
         await drop.ExecuteNonQueryAsync();
     }
 

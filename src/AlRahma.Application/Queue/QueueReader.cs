@@ -98,9 +98,10 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
         var nowUtc = clock.UtcNow;
         (string? Status, DateTimeOffset? Deadline) Ack(QueueTicket t)
         {
-            if (t.Status != TicketStatuses.Called || t.CalledAt is not { } called || !withApp.Contains(t.PatientId)) return (null, null);
+            if (t.Status != TicketStatuses.Called || t.CalledAt is not { } called) return (null, null);
+            if (t.CallAcknowledgedAt is not null) return ("acknowledged", null);
+            if (!withApp.Contains(t.PatientId)) return (null, null);
             var deadline = called.AddMinutes(ackTimeout);
-            if (t.CallAcknowledgedAt is not null) return ("acknowledged", deadline);
             return (nowUtc >= deadline ? "no_response" : "waiting", deadline);
         }
         var visitReferrals = await engine.VisitReferralsAsync(awaitingIds, ct);

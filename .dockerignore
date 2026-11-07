@@ -3,3 +3,10 @@
 .git
 .github
 .env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/App_Data
+**/TestResults
+tests

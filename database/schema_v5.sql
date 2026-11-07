@@ -563,6 +563,7 @@ CREATE TABLE consultation_addenda (
 );
 
 CREATE TABLE prescriptions (
+    text                TEXT,
     prescription_id     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     consultation_id     UUID NOT NULL UNIQUE REFERENCES consultations(consultation_id),
     patient_id          UUID NOT NULL REFERENCES patients(patient_id),

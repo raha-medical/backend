@@ -23,6 +23,7 @@ public record PrescriptionDto(Guid PrescriptionId, string PrescriptionCode, stri
     string DoctorName, string ClinicName, string BranchName, string? Diagnosis, DateTimeOffset IssuedAt, DateTimeOffset ExpiresAt, string Status,
     DateTimeOffset? DispensedAt, string? DispensedBy, IReadOnlyList<PrescriptionItemDto> Items)
 {
+    public string? Text { get; init; }
     /// <summary>دورة التحويل في تطبيق المريض (العقد 23).</summary>
     public Guid? ReferralId { get; init; }
     public string? ReferralStatus { get; init; }
@@ -58,6 +59,8 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
             throw new AppException(409, "PRESCRIPTION_EXPIRED", "انتهت صلاحية الوصفة", "يحتاج المريض وصفة جديدة من الطبيب");
 
         var input = req.Lines ?? [];
+        if (!string.IsNullOrWhiteSpace(rx.Text) && rx.Lines.Count == 0)
+            throw new AppException(422, "PRESCRIPTION_NOT_BILLED", "أضف علاجات الصرف وسعّرها أولاً");
         var v = new Validator();
         var expected = rx.Lines.Select(l => l.LineNo).OrderBy(x => x).ToList();
         var given = input.Where(l => l.LineNo is not null).Select(l => l.LineNo!.Value).ToList();
@@ -166,7 +169,7 @@ public class PharmacyService(IAppDbContext db, ICurrentUser current, IAuditLogge
                 {
                     ServiceId = l.ServiceId, Quantity = l.Quantity, UnitPrice = l.UnitPrice, InvoiceItemId = l.InvoiceItemId,
                     PaymentStatus = l.InvoiceItemId is { } ii ? paid.GetValueOrDefault(ii) : null,
-                }).ToList());
+                }).ToList()) { Text = r.Text };
         }).ToList();
     }
 }

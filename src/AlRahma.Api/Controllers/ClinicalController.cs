@@ -80,15 +80,21 @@ public class ClinicalController(ConsultationService consultations, ICurrentUser 
 [ApiController]
 [Route("api/v1/lab")]
 [Produces("application/json")]
-public class LabController(LabService lab) : ControllerBase
+public class LabController(LabService lab, ConsultationService consultations) : ControllerBase
 {
+    [HttpPost("orders/direct")]
+    [Authorize(Policy = Permissions.LabWrite)]
+    [Idempotent]
+    public async Task<IActionResult> Direct(DirectOrderRequest req, CancellationToken ct) =>
+        StatusCode(201, await consultations.CreateLabDirectOrdersAsync(req, ct));
+
     [HttpGet("worklist")]
     [Authorize(Policy = Policies.LabRead)]
     [ProducesResponseType<PagedResult<WorklistItemDto>>(200)]
     public Task<PagedResult<WorklistItemDto>> Worklist([FromQuery(Name = "status")] string? status, [FromQuery(Name = "date")] DateOnly? date,
         [FromQuery(Name = "q")] string? q, [FromQuery(Name = "page")] int page = 1, [FromQuery(Name = "page_size")] int pageSize = 20,
-        CancellationToken ct = default) =>
-        lab.WorklistAsync(new WorklistQuery(status, date, q, null, page, pageSize), ct);
+        [FromQuery(Name = "source")] string? source = null, CancellationToken ct = default) =>
+        lab.WorklistAsync(new WorklistQuery(status, date, q, null, page, pageSize, source), ct);
 
     [HttpPost("orders/{orderItemId:guid}/collect-sample")]
     [Authorize(Policy = Permissions.LabWrite)]
@@ -164,6 +170,16 @@ public class RadiologyController(RadiologyService radiology) : ControllerBase
 [Produces("application/json")]
 public class PharmacyController(PharmacyService pharmacy, PharmacyBillingService billing) : ControllerBase
 {
+    [HttpGet("external-sales")]
+    [Authorize(Policy = Policies.PharmacyRead)]
+    public Task<PagedResult<ExternalSaleSummary>> ExternalSales([FromQuery] string? status, [FromQuery] string? q,
+        [FromQuery] int page = 1, [FromQuery(Name = "page_size")] int pageSize = 20, CancellationToken ct = default) =>
+        billing.ExternalSalesAsync(status, q, page, pageSize, ct);
+
+    [HttpGet("external-sales/{invoiceId:guid}")]
+    [Authorize(Policy = Policies.PharmacyRead)]
+    public Task<PharmacyBillDto> ExternalBill(Guid invoiceId, CancellationToken ct) => billing.ExternalBillAsync(invoiceId, ct);
+
     /// <summary>تسعير الوصفة: لكل سطر متوفر/غير متوفر، يريده المراجع أم لا، والكمية، والدواء من القائمة أو سعر يدوي. يُنشئ فاتورة الأدوية.</summary>
     [HttpPost("prescriptions/{prescriptionId:guid}/bill")]
     [Authorize(Policy = Permissions.PharmacyDispense)]
@@ -234,8 +250,8 @@ public class ReferralsController(ReferralService referrals) : ControllerBase
     [ProducesResponseType<PagedResult<ReferralDto>>(200)]
     public Task<PagedResult<ReferralDto>> List([FromQuery(Name = "service")] string? service, [FromQuery(Name = "status")] string? status,
         [FromQuery(Name = "date")] DateOnly? date, [FromQuery(Name = "q")] string? q, [FromQuery(Name = "page")] int page = 1,
-        [FromQuery(Name = "page_size")] int pageSize = 20, CancellationToken ct = default) =>
-        referrals.ListAsync(service, status, date, q, page, pageSize, ct);
+        [FromQuery(Name = "page_size")] int pageSize = 20, [FromQuery(Name = "source")] string? source = null, CancellationToken ct = default) =>
+        referrals.ListAsync(service, status, date, q, page, pageSize, ct, source);
 
     [HttpGet("api/v1/referrals/summary")]
     [Authorize]

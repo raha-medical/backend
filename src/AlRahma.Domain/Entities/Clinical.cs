@@ -35,6 +35,7 @@ public static class PrescriptionStatuses
 
 public class Prescription
 {
+    public string? Text { get; set; }
     public Guid PrescriptionId { get; set; }
     public Guid ConsultationId { get; set; }
     public Guid PatientId { get; set; }

@@ -19,6 +19,7 @@ public record PharmacyBillLineDto(Guid DispenseLineId, short? LineNo, string Dru
 public record PharmacyBillDto(Guid? InvoiceId, string? InvoiceNumber, Guid PatientId, string PatientName, string? FileNumber, long TotalDue,
     bool AllPaid, IReadOnlyList<PharmacyBillLineDto> Lines);
 public record ExternalSaleItemInput(Guid? ServiceId, short? Quantity);
+public record ExternalSaleSummary(Guid InvoiceId, string PatientName, string FileNumber, string? PhoneNumber, DateTimeOffset CreatedAt, string Status, long Amount);
 /// <summary>
 /// صرف لمراجع خارجي (6.3-ب): patient_id أو new_patient (الاسم والهاتف)، والأدوية من القائمة. الدواء الذي يحتاج وصفة
 /// لا يُصرف إلا مع prescription_file_id (صورة الوصفة، purpose=prescription) أو note (ملاحظة إلزامية).
@@ -55,6 +56,34 @@ public class PharmacyBillingService(IAppDbContext db, ICurrentUser current, IAud
 
     // ------------------------------------------------------------------ تسعير وصفة داخلية
 
+    public async Task<PagedResult<ExternalSaleSummary>> ExternalSalesAsync(string? status, string? search, int page, int pageSize, CancellationToken ct)
+    {
+        new Validator().Check(status is null or "billed" or "dispensed", "status", "billed | dispensed").ThrowIfInvalid();
+        var q = from invoice in db.Invoices.AsNoTracking()
+                join patient in db.Patients.AsNoTracking() on invoice.PatientId equals patient.PatientId
+                where invoice.BranchId == current.BranchId && db.PharmacyDispenseLines.Any(l => l.InvoiceId == invoice.InvoiceId && l.IsExternal && l.BranchId == current.BranchId)
+                select new { invoice, patient, Pending = db.PharmacyDispenseLines.Any(l => l.InvoiceId == invoice.InvoiceId && l.Status == PharmacyLineStatuses.Billed) };
+        if (status is not null) q = q.Where(x => x.Pending == (status == "billed"));
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var term = search.Trim();
+            q = q.Where(x => EF.Functions.ILike(x.patient.FullName, $"%{term}%") || x.patient.FileNumber == term || x.patient.PhoneNumber == term);
+        }
+        var p = new PageQuery(page, pageSize);
+        var total = await q.CountAsync(ct);
+        var rows = await q.OrderByDescending(x => x.invoice.CreatedAt).Skip((p.SafePage - 1) * p.SafePageSize).Take(p.SafePageSize)
+            .Select(x => new ExternalSaleSummary(x.invoice.InvoiceId, x.patient.FullName, x.patient.FileNumber, x.patient.PhoneNumber, x.invoice.CreatedAt,
+                x.Pending ? "billed" : "dispensed", x.invoice.NetAmount)).ToListAsync(ct);
+        return new PagedResult<ExternalSaleSummary>(rows, p.SafePage, p.SafePageSize, total);
+    }
+
+    public async Task<PharmacyBillDto> ExternalBillAsync(Guid invoiceId, CancellationToken ct)
+    {
+        var rows = await db.PharmacyDispenseLines.AsNoTracking().Where(l => l.BranchId == current.BranchId && l.IsExternal && l.InvoiceId == invoiceId).ToListAsync(ct);
+        if (rows.Count == 0) throw new AppException(404, "SALE_NOT_FOUND", "طلب الصيدلية غير موجود في هذا الفرع");
+        return await ToBillAsync(rows[0].PatientId, rows, ct);
+    }
+
     public async Task<PharmacyBillDto> BillAsync(Guid prescriptionId, BillPrescriptionRequest req, CancellationToken ct)
     {
         await using var tx = await db.BeginTransactionAsync(ct);
@@ -72,7 +101,10 @@ public class PharmacyBillingService(IAppDbContext db, ICurrentUser current, IAud
         var expected = rx.Lines.Select(l => l.LineNo).OrderBy(x => x).ToList();
         var given = input.Where(l => l.LineNo is not null).Select(l => l.LineNo!.Value).ToList();
         var v = new Validator();
-        v.Check(given.Count == input.Count && given.Distinct().Count() == given.Count && given.OrderBy(x => x).SequenceEqual(expected),
+        var textEntry = !string.IsNullOrWhiteSpace(rx.Text) && rx.Lines.Count == 0;
+        if (textEntry) expected = Enumerable.Range(1, input.Count).Select(n => (short)n).ToList();
+        v.Check(!textEntry || input.Count is > 0 and <= 30, "lines", "أضف من 1 إلى 30 علاجاً للصرف")
+            .Check(given.Count == input.Count && given.Distinct().Count() == given.Count && given.OrderBy(x => x).SequenceEqual(expected),
             "lines", $"أرسل كل الأسطر مرة واحدة ({string.Join("، ", expected)})");
         var serviceIds = input.Where(l => l.ServiceId is not null).Select(l => l.ServiceId!.Value).Distinct().ToList();
         var drugs = await db.Services.AsNoTracking()
@@ -81,6 +113,7 @@ public class PharmacyBillingService(IAppDbContext db, ICurrentUser current, IAud
         for (var i = 0; i < input.Count; i++)
         {
             var l = input[i];
+            v.Check(!textEntry || l.ServiceId is not null, $"lines[{i}].service_id", "اختر العلاج من كتالوج الصيدلية للوصفة النصية");
             v.Check(l.Available is not null, $"lines[{i}].available", "حدد متوفر أو غير متوفر");
             var sell = l.Available == true && l.Wanted != false;
             v.Check(!sell || l.Quantity is > 0 and <= 1000, $"lines[{i}].quantity", "الكمية من 1 إلى 1000");
@@ -91,6 +124,9 @@ public class PharmacyBillingService(IAppDbContext db, ICurrentUser current, IAud
             v.Check(l.Reason is null || l.Reason.Length <= 300, $"lines[{i}].reason", "300 حرف كحد أقصى");
         }
         v.ThrowIfInvalid();
+
+        if (textEntry)
+            rx.Lines.AddRange(input.Select(l => new PrescriptionLine { PrescriptionId = rx.PrescriptionId, LineNo = l.LineNo!.Value, DrugName = drugs[l.ServiceId!.Value].Name }));
 
         var now = clock.UtcNow;
         Invoice? invoice = null;

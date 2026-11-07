@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'release/**']
   pull_request:
 
 jobs:
@@ -28,3 +28,20 @@ jobs:
       - run: dotnet restore
       - run: dotnet build --no-restore -c Release
       - run: dotnet test --no-build -c Release --logger "console;verbosity=normal"
+      - run: docker build -t alrahma-api:ci .
+      - name: Container startup and database health
+        run: |
+          docker run -d --name api-smoke --network host \
+            -e PORT=8099 \
+            -e 'ConnectionStrings__Default=Host=localhost;Port=5432;Database=postgres;Username=postgres;Password=postgres' \
+            -e Jwt__SigningKey=ci-only-fake-signing-key-not-for-deployment-0123456789 \
+            alrahma-api:ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8099/health; then exit 0; fi
+            sleep 2
+          done
+          docker logs api-smoke
+          exit 1
+      - name: Remove smoke container
+        if: always()
+        run: docker rm -f api-smoke || true

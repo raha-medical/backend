@@ -11,18 +11,18 @@ namespace AlRahma.Application.Clinical;
 public record PrescriptionLineInput(string? DrugName, string? Dose, string? Frequency, short? DurationDays, string? Instructions);
 public record CreateConsultationRequest(Guid? ConsultationId, Guid? TicketId, string? Diagnosis, string? Icd10Code, string? ClinicalNotes,
     string? PrivateNotes, List<PrescriptionLineInput>? Prescription, List<OrderLineInput>? LabOrders, List<OrderLineInput>? RadiologyOrders,
-    short? FollowUpAfterDays, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null);
+    short? FollowUpAfterDays, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null, string? PrescriptionText = null);
 /// <param name="ExpectReturn">مع finish_visit: هل يعود المراجع بالنتائج؟ null = تلقائياً من التحويلات (انظر CompleteTicketRequest).</param>
 /// <param name="FinishVisit">"حفظ وإنهاء": يحفظ ثم ينهي المعاينة في الطابور (نفس POST /queue/tickets/{id}/complete).</param>
 /// <param name="CallNext">مع finish_visit: استدعاء المريض التالي. null = إعداد الفرع queue.auto_call_next.</param>
 public record UpdateConsultationRequest(string? Diagnosis, string? Icd10Code, string? ClinicalNotes, string? PrivateNotes, short? FollowUpAfterDays,
-    List<PrescriptionLineInput>? Prescription, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null);
+    List<PrescriptionLineInput>? Prescription, bool? FinishVisit = null, bool? CallNext = null, bool? ExpectReturn = null, string? PrescriptionText = null);
 public record AddOrdersRequest(List<OrderLineInput>? LabOrders, List<OrderLineInput>? RadiologyOrders);
 public record AddAddendumRequest(string? Text);
 
 public record PatientSummaryDto(Guid PatientId, string FullName, string FileNumber, string? Gender, int? Age);
 public record PrescriptionLineDto(short LineNo, string DrugName, string? Dose, string? Frequency, short? DurationDays, string? Instructions);
-public record ConsultationPrescriptionDto(Guid PrescriptionId, string PrescriptionCode, string Status, DateTimeOffset ExpiresAt, IReadOnlyList<PrescriptionLineDto> Lines);
+public record ConsultationPrescriptionDto(Guid PrescriptionId, string PrescriptionCode, string Status, DateTimeOffset ExpiresAt, IReadOnlyList<PrescriptionLineDto> Lines) { public string? Text { get; init; } }
 public record ConsultationOrderDto(Guid OrderItemId, string Department, Guid ServiceId, string ServiceName, string? Note, string Status,
     string PaymentStatus, Guid InvoiceItemId, long Price, bool HasCritical, bool ResultAvailable);
 public record AddendumDto(Guid AddendumId, string Text, string CreatedBy, DateTimeOffset CreatedAt);
@@ -35,14 +35,14 @@ public record ConsultationDto(Guid ConsultationId, Guid TicketId, string TicketN
     public Queue.TicketActionResponse? Queue { get; init; }
 }
 
-public record HistoryPrescriptionDto(string PrescriptionCode, string Status, IReadOnlyList<PrescriptionLineDto> Lines);
+public record HistoryPrescriptionDto(string PrescriptionCode, string Status, IReadOnlyList<PrescriptionLineDto> Lines) { public string? Text { get; init; } }
 public record HistoryOrderDto(Guid OrderItemId, string Department, string ServiceName, string Status, bool HasCritical, bool ResultAvailable);
 public record HistoryItemDto(Guid ConsultationId, DateOnly Date, string BranchName, string DoctorName, string ClinicName, string? VisitKind,
     string? Diagnosis, string? Icd10Code, string? ClinicalNotes, string? PrivateNotes, HistoryPrescriptionDto? Prescription,
     IReadOnlyList<HistoryOrderDto> Orders, int AddendaCount);
 public record PatientHistoryDto(Guid PatientId, IReadOnlyList<HistoryItemDto> Items, int Page, int PageSize, int Total);
 
-public record VisitPrescriptionDto(string PrescriptionCode, string Status, DateTimeOffset ExpiresAt, IReadOnlyList<PrescriptionLineDto> Lines);
+public record VisitPrescriptionDto(string PrescriptionCode, string Status, DateTimeOffset ExpiresAt, IReadOnlyList<PrescriptionLineDto> Lines) { public string? Text { get; init; } }
 public record VisitOrderDto(Guid OrderItemId, string Department, string ServiceName, string Status, bool ResultAvailable, bool PaymentRequired);
 public record VisitDto(Guid ConsultationId, DateOnly Date, string DoctorName, string ClinicName, string? Diagnosis, DateOnly? FollowUpDate,
     VisitPrescriptionDto? Prescription, IReadOnlyList<VisitOrderDto> Orders)
@@ -62,12 +62,13 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
     /// ملف المراجع الخارجي المختصر (الاسم والهاتف): ملف موجود بنفس الهاتف والاسم يُستخدم، وإلا يُنشأ (6.3).
     /// يُستخدم في الطلب المباشر للمختبر والأشعة وفي صرف الصيدلية للمراجع الخارجي.
     /// </summary>
-    public async Task<(Guid PatientId, bool Created)> ResolveExternalPatientAsync(Guid? patientId, ExternalPatientInput? input, CancellationToken ct)
+    public async Task<(Guid PatientId, bool Created)> ResolveExternalPatientAsync(Guid? patientId, ExternalPatientInput? input, CancellationToken ct, bool labRegistration = false)
     {
         if (patientId is { } id) return (id, false);
         if (input is null)
             throw AppException.Validation(new Dictionary<string, string[]> { ["patient_id"] = ["اختر المراجع أو أدخل اسم وهاتف المراجع الخارجي"] });
-        if (!current.Has(Domain.Common.Permissions.PatientsWrite) && !current.Has(Domain.Common.Permissions.PharmacyDispense))
+        if (!current.Has(Domain.Common.Permissions.PatientsWrite) && !current.Has(Domain.Common.Permissions.PharmacyDispense)
+            && !(labRegistration && current.Has(Permissions.LabWrite)))
             throw AppException.Forbidden("إنشاء ملف المراجع يتطلب صلاحية تسجيل المرضى");
         var phone = Common.PhoneNumbers.Normalize(input.PhoneNumber);
         var name = string.Join(' ', (input.FullName ?? "").Split(' ', StringSplitOptions.RemoveEmptyEntries));
@@ -118,7 +119,9 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
             PrivateNotes = Clean(req.PrivateNotes), FollowUpAfterDays = req.FollowUpAfterDays, CreatedAt = now, UpdatedAt = now,
         };
         db.Consultations.Add(c);
-        var newRx = req.Prescription is { Count: > 0 } rx ? await AddPrescriptionAsync(c, rx, ticket.BranchId, ct) : null;
+        ValidatePrescriptionText(req.PrescriptionText, req.Prescription);
+        var newRx = !string.IsNullOrWhiteSpace(req.PrescriptionText) ? await AddPrescriptionAsync(c, [], ticket.BranchId, ct, req.PrescriptionText)
+            : req.Prescription is { Count: > 0 } rx ? await AddPrescriptionAsync(c, rx, ticket.BranchId, ct) : null;
         var orders = await billing.CreateAsync(ticket.BranchId, c.PatientId, doctor.DoctorId, c.ConsultationId, null, lines, ct);
         audit.Add("CONSULTATION_CREATED", "consultation", id, after: new
         {
@@ -161,9 +164,13 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
 
     public async Task<ConsultationDto> UpdateAsync(Guid consultationId, UpdateConsultationRequest req, CancellationToken ct)
     {
+        var changingPrescription = req.PrescriptionText is not null || req.Prescription is not null;
+        await using var prescriptionTransaction = changingPrescription ? await db.BeginTransactionAsync(ct) : null;
         ValidateText(req.Diagnosis, req.Icd10Code, req.ClinicalNotes, req.PrivateNotes, req.FollowUpAfterDays, req.Prescription);
         new Validator().Check(req.CallNext is null || req.FinishVisit == true, "call_next", "يُستخدم مع finish_visit فقط").ThrowIfInvalid();
         var (c, branchId) = await LoadOwnAsync(consultationId, requireWindow: true, ct);
+        if (changingPrescription)
+            await db.ExecuteAsync($"SELECT 1 FROM prescriptions WHERE consultation_id = {consultationId} FOR UPDATE", ct);
         if (req.CallNext == true) await queue.EnsureCallAllowedAsync(branchId, ct);
         var before = new { c.Diagnosis, c.Icd10Code, c.ClinicalNotes, c.FollowUpAfterDays };
         if (req.Diagnosis is not null) c.Diagnosis = Clean(req.Diagnosis);
@@ -171,14 +178,29 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         if (req.ClinicalNotes is not null) c.ClinicalNotes = Clean(req.ClinicalNotes);
         if (req.PrivateNotes is not null) c.PrivateNotes = Clean(req.PrivateNotes);
         if (req.FollowUpAfterDays is not null) c.FollowUpAfterDays = req.FollowUpAfterDays == 0 ? null : req.FollowUpAfterDays;
-        if (req.Prescription is not null)
+        ValidatePrescriptionText(req.PrescriptionText, req.Prescription);
+        if (req.PrescriptionText is not null)
         {
             var rx = await db.Prescriptions.Include(p => p.Lines).FirstOrDefaultAsync(p => p.ConsultationId == c.ConsultationId, ct);
-            if (rx is not null && rx.Status == PrescriptionStatuses.Dispensed)
+            if (rx is not null && rx.Text != Clean(req.PrescriptionText))
+            {
+                if (rx.Status == PrescriptionStatuses.Dispensed || await db.PharmacyDispenseLines.AnyAsync(l => l.PrescriptionId == rx.PrescriptionId, ct))
+                    throw new AppException(409, "PRESCRIPTION_LOCKED", "سُعّرت الوصفة أو صُرفت ولا يمكن تغييرها، أضف ملحقاً");
+                db.PrescriptionLines.RemoveRange(rx.Lines); rx.Lines.Clear();
+                if (string.IsNullOrWhiteSpace(req.PrescriptionText)) db.Prescriptions.Remove(rx);
+                else rx.Text = Clean(req.PrescriptionText);
+            }
+            else if (rx is null && !string.IsNullOrWhiteSpace(req.PrescriptionText)) await AddPrescriptionAsync(c, [], branchId, ct, req.PrescriptionText);
+        }
+        else if (req.Prescription is not null)
+        {
+            var rx = await db.Prescriptions.Include(p => p.Lines).FirstOrDefaultAsync(p => p.ConsultationId == c.ConsultationId, ct);
+            if (rx is not null && (rx.Status == PrescriptionStatuses.Dispensed || await db.PharmacyDispenseLines.AnyAsync(l => l.PrescriptionId == rx.PrescriptionId, ct)))
                 throw new AppException(409, "PRESCRIPTION_ALREADY_DISPENSED", "صُرفت الوصفة ولا يمكن تعديلها", "أضف ملحقاً");
             if (rx is not null)
             {
                 db.PrescriptionLines.RemoveRange(rx.Lines);
+                rx.Text = null;
                 rx.Lines.Clear();
                 if (req.Prescription.Count == 0) db.Prescriptions.Remove(rx);
                 else rx.Lines.AddRange(Lines(rx.PrescriptionId, req.Prescription));
@@ -189,6 +211,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         audit.Add("CONSULTATION_UPDATED", "consultation", c.ConsultationId, before: before,
             after: new { c.Diagnosis, c.Icd10Code, c.ClinicalNotes, c.FollowUpAfterDays, prescription_lines = req.Prescription?.Count });
         await db.SaveChangesAsync(ct);
+        if (prescriptionTransaction is not null) await prescriptionTransaction.CommitAsync(ct);
         return await FinishAsync(await GetAsync(c.ConsultationId, ct), req.FinishVisit, req.CallNext, ct, req.ExpectReturn);
     }
 
@@ -221,7 +244,16 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
 
     // ------------------------------------------------------------------ الطلب المباشر (الاستقبال) والإلغاء
 
-    public async Task<DirectOrderResponse> CreateDirectOrdersAsync(DirectOrderRequest req, CancellationToken ct)
+    public Task<DirectOrderResponse> CreateLabDirectOrdersAsync(DirectOrderRequest req, CancellationToken ct)
+    {
+        if (!current.Has(Permissions.LabWrite)) throw AppException.Forbidden();
+        return CreateDirectOrdersCoreAsync(req with { ReferringDoctorName = null }, ct, labOnly: true);
+    }
+
+    public Task<DirectOrderResponse> CreateDirectOrdersAsync(DirectOrderRequest req, CancellationToken ct) =>
+        CreateDirectOrdersCoreAsync(req, ct, labOnly: false);
+
+    private async Task<DirectOrderResponse> CreateDirectOrdersCoreAsync(DirectOrderRequest req, CancellationToken ct, bool labOnly)
     {
         var items = req.Items ?? [];
         new Validator()
@@ -230,12 +262,11 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
             .Check(req.ReferringDoctorName is null || req.ReferringDoctorName.Length <= 150, "referring_doctor_name", "150 حرفاً كحد أقصى")
             .ThrowIfInvalid();
         // الخدمات تُتحقق قبل إنشاء ملف المراجع الخارجي حتى لا يبقى ملف بلا طلب
-        await billing.ResolveAsync(current.BranchId, items.Select((x, i) => ($"items[{i}]", x, (string?)null)).ToList(), ct);
-        var (patientId, patientCreated) = await ResolveExternalPatientAsync(req.PatientId, req.NewPatient, ct);
+        var lines = await billing.ResolveAsync(current.BranchId, items.Select((x, i) => ($"items[{i}]", x, labOnly ? ServiceTypes.Lab : (string?)null)).ToList(), ct);
+        var (patientId, patientCreated) = await ResolveExternalPatientAsync(req.PatientId, req.NewPatient, ct, labRegistration: labOnly);
         var patient = await db.Patients.AsNoTracking().FirstOrDefaultAsync(p => p.PatientId == patientId, ct)
                       ?? throw new AppException(404, "PATIENT_NOT_FOUND", "المريض غير موجود");
         if (patient.MergedIntoPatientId is not null) throw new AppException(409, "PATIENT_MERGED", "هذا الملف مدموج في ملف آخر");
-        var lines = await billing.ResolveAsync(current.BranchId, items.Select((x, i) => ($"items[{i}]", x, (string?)null)).ToList(), ct);
         var orders = await billing.CreateAsync(current.BranchId, patient.PatientId, null, null, Clean(req.ReferringDoctorName), lines, ct);
         audit.Add("DIRECT_ORDERS_CREATED", "patient", patient.PatientId, after: new
         {
@@ -303,7 +334,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         var ctx = await ContextAsync(rows, ct);
         var items = dtos.Select(d => new HistoryItemDto(d.ConsultationId, Day(d.CreatedAt), ctx.BranchNames.GetValueOrDefault(d.TicketId, ""), d.DoctorName,
             d.ClinicName, d.VisitKind, d.Diagnosis, d.Icd10Code, d.ClinicalNotes, d.PrivateNotes,
-            d.Prescription is null ? null : new HistoryPrescriptionDto(d.Prescription.PrescriptionCode, d.Prescription.Status, d.Prescription.Lines),
+            d.Prescription is null ? null : new HistoryPrescriptionDto(d.Prescription.PrescriptionCode, d.Prescription.Status, d.Prescription.Lines) { Text = d.Prescription.Text },
             d.Orders.Select(o => new HistoryOrderDto(o.OrderItemId, o.Department, o.ServiceName, o.Status, o.HasCritical, o.ResultAvailable)).ToList(),
             d.Addenda.Count)).ToList();
         return new PatientHistoryDto(patientId, items, p.SafePage, p.SafePageSize, total);
@@ -334,7 +365,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         }
         return new PagedResult<VisitDto>(dtos.Select(d => new VisitDto(d.ConsultationId, Day(d.CreatedAt), d.DoctorName, d.ClinicName, d.Diagnosis,
             d.FollowUpDate,
-            d.Prescription is null ? null : new VisitPrescriptionDto(d.Prescription.PrescriptionCode, d.Prescription.Status, d.Prescription.ExpiresAt, d.Prescription.Lines),
+            d.Prescription is null ? null : new VisitPrescriptionDto(d.Prescription.PrescriptionCode, d.Prescription.Status, d.Prescription.ExpiresAt, d.Prescription.Lines) { Text = d.Prescription.Text },
             d.Orders.Where(o => o.Status != OrderStatuses.Cancelled).Select(o => new VisitOrderDto(o.OrderItemId, o.Department, o.ServiceName, o.Status,
                 o.ResultAvailable && (o.PaymentStatus is "paid" or "refunded" || (o.PaymentStatus == "deferred" && showDeferred.GetValueOrDefault(d.ConsultationId))),
                 o.PaymentStatus == "unpaid" || (o.PaymentStatus == "deferred" && o.ResultAvailable && !showDeferred.GetValueOrDefault(d.ConsultationId)))).ToList())
@@ -366,7 +397,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         return await billing.ResolveAsync(branchId, inputs, ct);
     }
 
-    private async Task<Prescription> AddPrescriptionAsync(Consultation c, List<PrescriptionLineInput> lines, Guid branchId, CancellationToken ct)
+    private async Task<Prescription> AddPrescriptionAsync(Consultation c, List<PrescriptionLineInput> lines, Guid branchId, CancellationToken ct, string? text = null)
     {
         var days = await settings.GetLongAsync(SettingsReader.PrescriptionValidDays, branchId, 30, ct);
         string code;
@@ -376,11 +407,18 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
         {
             PrescriptionId = UuidV7.New(), ConsultationId = c.ConsultationId, PatientId = c.PatientId, DoctorId = c.DoctorId,
             PrescriptionCode = code, IssuedAt = clock.UtcNow, ExpiresAt = clock.UtcNow.AddDays(days),
+            Text = Clean(text),
         };
         rx.Lines.AddRange(Lines(rx.PrescriptionId, lines));
         db.Prescriptions.Add(rx);
         referrals.TrackPrescription(rx, branchId);
         return rx;
+    }
+
+    private static void ValidatePrescriptionText(string? text, List<PrescriptionLineInput>? lines)
+    {
+        new Validator().Check(text is null || text.Length <= 10000, "prescription_text", "10000 حرف كحد أقصى")
+            .Check(text is null || lines is null || lines.Count == 0, "prescription_text", "أرسل النص الكامل أو الأسطر القديمة، وليس كليهما").ThrowIfInvalid();
     }
 
     private static IEnumerable<PrescriptionLine> Lines(Guid prescriptionId, List<PrescriptionLineInput> lines) =>
@@ -488,7 +526,7 @@ public class ConsultationService(IAppDbContext db, ICurrentUser current, IAuditL
                 c.Diagnosis, c.Icd10Code, c.ClinicalNotes, showPrivate ? c.PrivateNotes : null, c.FollowUpAfterDays,
                 c.FollowUpAfterDays is { } f and > 0 ? Day(c.CreatedAt).AddDays(f) : null,
                 rx is null ? null : new ConsultationPrescriptionDto(rx.PrescriptionId, rx.PrescriptionCode, EffectiveStatus(rx, clock.UtcNow), rx.ExpiresAt,
-                    rx.Lines.OrderBy(l => l.LineNo).Select(l => new PrescriptionLineDto(l.LineNo, l.DrugName, l.Dose, l.Frequency, l.DurationDays, l.Instructions)).ToList()),
+                    rx.Lines.OrderBy(l => l.LineNo).Select(l => new PrescriptionLineDto(l.LineNo, l.DrugName, l.Dose, l.Frequency, l.DurationDays, l.Instructions)).ToList()) { Text = rx.Text },
                 orders.Where(x => x.o.ConsultationId == c.ConsultationId).Select(x => new ConsultationOrderDto(x.o.OrderItemId, x.o.Department, x.o.ServiceId,
                     x.ServiceName, x.o.Note, x.o.Status, PaymentStatusOf(x.ItemStatus), x.o.InvoiceItemId, x.NetPrice, x.o.HasCritical,
                     x.o.Status == OrderStatuses.Released)).ToList(),

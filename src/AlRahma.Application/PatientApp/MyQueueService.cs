@@ -48,6 +48,7 @@ public class MyQueueService(IAppDbContext db, IClock clock, PatientPortalService
         var now = clock.UtcNow;
         // PostgreSQL يحفظ الوقت بدقة الميكروثانية، فنقص الأجزاء الأصغر ليطابق الرد ما يُحفظ
         ticket.CallAcknowledgedAt = now.AddTicks(-(now.Ticks % 10));
+        ticket.CallAckBy = "patient";
         await db.SaveChangesAsync(ct);
         await notifier.SessionChangedAsync(ticket.SessionId, ct);
         return new AcknowledgeCallResponse(ticket.TicketId, ticket.Status, ticket.CallAcknowledgedAt.Value);

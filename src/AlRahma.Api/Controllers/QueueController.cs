@@ -53,6 +53,11 @@ public class QueueController(QueueService queue, DeviceService devices) : Contro
     [ProducesResponseType<TicketActionResponse>(200)]
     public Task<TicketActionResponse> Start(Guid ticketId, CancellationToken ct) => queue.StartAsync(ticketId, ct);
 
+    /// <summary>«حضر»: الاستقبال يؤكد حضور المريض المستدعى نيابة عنه (بلا هاتف أو بلا تطبيق). تختفي «لم يرد».</summary>
+    [HttpPost("api/v1/queue/tickets/{ticketId:guid}/present")]
+    [ProducesResponseType<TicketActionResponse>(200)]
+    public Task<TicketActionResponse> Present(Guid ticketId, CancellationToken ct) => queue.MarkPresentAsync(ticketId, ct);
+
     /// <summary>
     /// إنهاء المعاينة. الطبيب، أو الاستقبال (لطبيب لا يستخدم النظام) إذا كان queue.call_next_by هو reception أو both، أو مدير الفرع.
     /// call_next: true = "إنهاء واستدعاء التالي".

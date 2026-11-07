@@ -8,8 +8,9 @@ using Microsoft.Extensions.Options;
 namespace AlRahma.Application.PatientApp.Gateways;
 
 /// <summary>
-/// بيانات الاختبار الثابتة للبوابة التجريبية (موثقة في dock/docs/review/audit-logic.md، قسم «بيانات اختبار البوابة التجريبية»).
-/// كل رقم يعطي نتيجة محددة دائماً.
+/// بيانات الاختبار للبوابة التجريبية (موثقة في dock/docs/handoff/accounts.md وdock/docs/review/audit-logic.md).
+/// الأرقام الخاصة في الجدولين تعطي نتيجة محددة دائماً (نجاح أو فشل). وأي رقم آخر صحيح الشكل ينجح:
+/// بطاقة 16 رقماً تجتاز فحص Luhn بتاريخ غير منتهٍ وأي CVV من 3 أرقام، أو محفظة زين كاش بصيغة 07… أو 9647….
 /// </summary>
 public static class MockGatewayTestData
 {
@@ -31,6 +32,7 @@ public static class MockGatewayTestData
         ["9647800000002"] = Outcomes.InsufficientFunds,
         ["9647800000003"] = Outcomes.Timeout,
         ["9647800000004"] = Outcomes.GatewayError,
+        ["9647809999999"] = Outcomes.NotFound,
     };
 
     public static readonly Dictionary<string, string> Cards = new()
@@ -48,7 +50,28 @@ public static class MockGatewayTestData
         public const string Declined = "declined";
         public const string Timeout = "timeout";
         public const string GatewayError = "gateway_error";
+        public const string NotFound = "not_found";
     }
+
+    /// <summary>فحص Luhn لرقم البطاقة (أرقام فقط).</summary>
+    public static bool Luhn(string digits)
+    {
+        if (digits.Length < 12 || !digits.All(char.IsDigit)) return false;
+        var sum = 0;
+        for (var i = 0; i < digits.Length; i++)
+        {
+            var d = digits[digits.Length - 1 - i] - '0';
+            if (i % 2 == 1) { d *= 2; if (d > 9) d -= 9; }
+            sum += d;
+        }
+        return sum % 10 == 0;
+    }
+
+    /// <summary>نتيجة المحفظة: رقم خاص من الجدول، وإلا نجاح (المحفظة صحيحة الشكل مسبقاً).</summary>
+    public static string WalletOutcome(string wallet) => Wallets.TryGetValue(wallet, out var o) ? o : Outcomes.Success;
+
+    /// <summary>نتيجة البطاقة: رقم خاص من الجدول، وإلا نجاح إن اجتاز Luhn، وإلا null (رقم غير صحيح).</summary>
+    public static string? CardOutcome(string card) => Cards.TryGetValue(card, out var o) ? o : Luhn(card) ? Outcomes.Success : null;
 }
 
 public record MockCredentialsRequest(string? WalletNumber, string? Pin, string? CardNumber, string? Expiry, string? Cvv);
@@ -174,7 +197,8 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             var wallet = NormalizeWallet(req.WalletNumber);
             new Validator().Check(wallet is not null, "wallet_number", "رقم المحفظة غير صحيح (مثال 07800000001)")
                 .Check(req.Pin is { Length: 4 } && req.Pin.All(char.IsDigit), "pin", "الرمز السري 4 أرقام").ThrowIfInvalid();
-            if (!MockGatewayTestData.Wallets.TryGetValue(wallet!, out outcome!))
+            outcome = MockGatewayTestData.WalletOutcome(wallet!);
+            if (outcome == MockGatewayTestData.Outcomes.NotFound)
                 throw new AppException(422, "ACCOUNT_NOT_FOUND", "رقم المحفظة غير مسجل في زين كاش");
             if (outcome == MockGatewayTestData.Outcomes.GatewayError)
                 throw new AppException(503, "GATEWAY_UNAVAILABLE", "تعذر الاتصال بالبوابة", "أعد المحاولة بعد قليل");
@@ -189,14 +213,16 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             new Validator().Check(card.Length == 16, "card_number", "رقم البطاقة 16 رقماً")
                 .Check(TryExpiry(req.Expiry, out _), "expiry", "تاريخ الانتهاء بصيغة MM/YY")
                 .Check(req.Cvv is { Length: 3 } && req.Cvv.All(char.IsDigit), "cvv", "CVV ثلاثة أرقام").ThrowIfInvalid();
-            if (!MockGatewayTestData.Cards.TryGetValue(card, out outcome!))
-                throw new AppException(422, "CARD_NOT_FOUND", "البطاقة غير معروفة لدى كي كارد");
+            var special = MockGatewayTestData.Cards.ContainsKey(card);
+            outcome = MockGatewayTestData.CardOutcome(card)
+                      ?? throw new AppException(422, "CARD_NOT_FOUND", "رقم البطاقة غير صحيح", "تحقق من الأرقام الستة عشر (فحص Luhn)");
             tx.TestAccount = card;
             tx.AccountMasked = card[..4] + " **** **** " + card[^4..];
             TryExpiry(req.Expiry, out var exp);
             if (exp < new DateOnly(now.Year, now.Month, 1))
                 return await FinishAsync(tx, GatewayStatuses.Failed, "CARD_EXPIRED", ct);
-            secretOk = req.Expiry!.Trim() == MockGatewayTestData.QiExpiry && req.Cvv == MockGatewayTestData.QiCvv;
+            // الأرقام الخاصة تتطلب بياناتها الموثقة (12/30 و123) لاختبار «بيانات خاطئة»؛ أي بطاقة أخرى صحيحة تقبل أي تاريخ غير منتهٍ وأي CVV
+            secretOk = !special || (req.Expiry!.Trim() == MockGatewayTestData.QiExpiry && req.Cvv == MockGatewayTestData.QiCvv);
             if (!secretOk) return await WrongSecretAsync(tx, "WRONG_CARD_DATA", "تاريخ الانتهاء أو CVV غير صحيح", ct);
         }
 
@@ -230,7 +256,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             throw new AppException(422, "WRONG_OTP", "رمز التحقق غير صحيح", $"المحاولات المتبقية {MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts}")
                 { Extensions = new Dictionary<string, object?> { ["attempts_left"] = MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts } };
         }
-        var outcome = tx.Provider == "zaincash" ? MockGatewayTestData.Wallets[tx.TestAccount!] : MockGatewayTestData.Cards[tx.TestAccount!];
+        var outcome = tx.Provider == "zaincash" ? MockGatewayTestData.WalletOutcome(tx.TestAccount!) : MockGatewayTestData.CardOutcome(tx.TestAccount!) ?? MockGatewayTestData.Outcomes.Declined;
         if (outcome == MockGatewayTestData.Outcomes.Timeout)
         {
             // البوابة لا ترد: المعاملة تبقى pending حتى تنتهي مهلتها، ثم يعطي الاستعلام failed/TIMEOUT

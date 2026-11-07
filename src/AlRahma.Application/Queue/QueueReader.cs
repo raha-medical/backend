@@ -11,6 +11,10 @@ public record QueueItemDto(Guid TicketId, string TicketNumber, Guid PatientId, s
 {
     /// <summary>المريض ضغط "أنا قادم" على تنبيه الاستدعاء.</summary>
     public DateTimeOffset? CallAcknowledgedAt { get; init; }
+    /// <summary>من أكّد الحضور: patient («تم، أنا قادم») | staff («حضر» من الاستقبال).</summary>
+    public string? CallAckBy { get; init; }
+    /// <summary>للمريض حساب في التطبيق (يستطيع الضغط على «تم، أنا قادم»). false = بلا تطبيق: لا تظهر له «لم يرد».</summary>
+    public bool HasApp { get; init; }
     /// <summary>عدد تنبيهات الاستدعاء المرسلة للمريض.</summary>
     public int CallAlertsSent { get; init; }
     /// <summary>
@@ -55,7 +59,15 @@ public record LiveQueueDto(Guid SessionId, Guid DoctorId, string DoctorName, Gui
     /// <summary>«تأخر الطبيب» المعلن (0 = لا تأخير)، وسببه إن ذُكر.</summary>
     public int DoctorDelayMinutes { get; init; }
     public string? DoctorDelayReason { get; init; }
+    /// <summary>
+    /// معاينات مفتوحة (in_room) للطبيب نفسه في وجبات أخرى (وجبة سابقة لم تُغلق). تمنع بدء معاينة جديدة (DOCTOR_BUSY)،
+    /// فتظهر للطبيب مع زر إنهائها. فارغة عادة.
+    /// </summary>
+    public IReadOnlyList<OpenExamDto> OpenExamsElsewhere { get; init; } = [];
 }
+
+/// <summary>معاينة مفتوحة في وجبة أخرى.</summary>
+public record OpenExamDto(Guid TicketId, string TicketNumber, Guid PatientId, string PatientName, Guid SessionId, DateOnly SessionDate, DateTimeOffset? StartedAt);
 
 public record DisplayBoardDto(string DoctorName, string? NowServing, IReadOnlyList<string> Next);
 public record DisplayQueueDto(string ClinicName, string? DoctorName, string? NowServing, IReadOnlyList<string> Next,
@@ -84,9 +96,10 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
         var byTicket = items.GroupBy(i => i.TicketId!.Value).ToDictionary(g => g.Key, g => g.OrderByDescending(i => i.CreatedAt).First());
         var awaitingIds = tickets.Where(t => t.Status == TicketStatuses.AwaitingResults).Select(t => t.TicketId).ToList();
         // رد المراجع على الاستدعاء: فقط لمن له حساب في التطبيق (غيره لا يستطيع الضغط على «تم»)
-        var calledPatients = tickets.Where(t => t.Status == TicketStatuses.Called).Select(t => t.PatientId).Distinct().ToList();
-        var withApp = calledPatients.Count == 0 ? [] : (await db.PatientAccountLinks.AsNoTracking()
-            .Where(l => calledPatients.Contains(l.PatientId)).Select(l => l.PatientId).Distinct().ToListAsync(ct)).ToHashSet();
+        var queuePatients = tickets.Where(t => t.Status is TicketStatuses.Waiting or TicketStatuses.Arrived or TicketStatuses.Called or TicketStatuses.InRoom)
+            .Select(t => t.PatientId).Distinct().ToList();
+        var withApp = queuePatients.Count == 0 ? [] : (await db.PatientAccountLinks.AsNoTracking()
+            .Where(l => queuePatients.Contains(l.PatientId)).Select(l => l.PatientId).Distinct().ToListAsync(ct)).ToHashSet();
         var ackTimeout = (int)await settings.GetLongAsync(SettingsReader.CallAckTimeoutMinutes, session.BranchId, 3, ct);
         var nowUtc = clock.UtcNow;
         (string? Status, DateTimeOffset? Deadline) Ack(QueueTicket t)
@@ -123,6 +136,11 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             .ToList();
 
         var avg = await engine.AverageConsultMinutesAsync(session.DoctorId, ct);
+        var openElsewhere = await db.QueueTickets.AsNoTracking()
+            .Where(t => t.DoctorId == session.DoctorId && t.Status == TicketStatuses.InRoom && t.SessionId != session.SessionId)
+            .OrderBy(t => t.StartedAt)
+            .Select(t => new OpenExamDto(t.TicketId, t.TicketNumber, t.PatientId, t.Patient!.FullName, t.SessionId, t.Session!.SessionDate, t.StartedAt))
+            .ToListAsync(ct);
         // التأخير يقاس على المحجوزين فقط (لهم موعد)؛ المراجع بدون حجز رقم تسلسله لا يعني موعداً
         var firstPending = ordered.FirstOrDefault(t => t.Status is TicketStatuses.Arrived or TicketStatuses.Waiting
                                                       && t.BookingId != null && t.Priority != TicketPriorities.LateReinserted);
@@ -146,7 +164,7 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
                     t.Status, QueueEngine.PaymentStatusOf(item), item?.InvoiceId, t.QueuePosition, t.EstimatedTime,
                     t.ArrivedAt, t.CalledAt, t.StartedAt, t.CompletedAt)
                 {
-                    CallAcknowledgedAt = t.CallAcknowledgedAt, CallAlertsSent = t.CallAlertsSent, CallAckStatus = ack.Status, CallAckDeadline = ack.Deadline,
+                    CallAcknowledgedAt = t.CallAcknowledgedAt, CallAckBy = t.CallAckBy, HasApp = withApp.Contains(t.PatientId), CallAlertsSent = t.CallAlertsSent, CallAckStatus = ack.Status, CallAckDeadline = ack.Deadline,
                     OnTheWayAt = t.OnTheWayAt, OnTheWayEtaMinutes = t.OnTheWayEtaMinutes, IsExtra = t.IsExtra,
                     DisplayState = display.State, DisplayStateAr = display.Ar, AwaitingServices = display.Services,
                     AwaitingSince = t.AwaitingSince, ReturnedAt = t.ReturnedAt, OriginalTicketId = t.OriginalTicketId,
@@ -157,6 +175,7 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             DoctorArrivedAt = session.DoctorArrivedAt, ScheduledEnd = session.EndTime.ToString("HH:mm"), Extended = session.ExtendedEndTime is not null,
             RegistrationClosed = session.RegistrationClosedAt is not null, AllowExtra = doctor.AllowExtra, CapacityTotal = session.CapacityTotal,
             DoctorDelayMinutes = session.DelayMinutes, DoctorDelayReason = session.DelayReason, CallAckTimeoutMinutes = ackTimeout,
+            OpenExamsElsewhere = openElsewhere,
         };
     }
 

@@ -44,6 +44,9 @@ public record TicketActionResponse(Guid TicketId, string TicketNumber, string St
 {
     /// <summary>في الإنهاء فقط: المريض التالي الذي استُدعي تلقائياً (أو null).</summary>
     public TicketActionResponse? NextTicket { get; init; }
+    /// <summary>تأكيد الحضور بعد الاستدعاء («تم، أنا قادم» أو «حضر») ومن أكّده: patient | staff.</summary>
+    public DateTimeOffset? CallAcknowledgedAt { get; init; }
+    public string? CallAckBy { get; init; }
 }
 /// <summary>call_next: استدعاء التالي تلقائياً بعد الإنهاء. null = إعداد الفرع queue.auto_call_next.
 /// expect_return: هل يعود المراجع بالنتائج؟ null = تلقائياً (للزيارة تحويل مختبر/أشعة/سونار غير مكتمل)،
@@ -659,6 +662,8 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         ticket.CalledAt = op.Now;
         // كل استدعاء (أو إعادة استدعاء) يبدأ تنبيهاً جديداً ينتظر "أنا قادم"
         ticket.CallAcknowledgedAt = null;
+        ticket.CallAckBy = null;
+        ticket.CallAckStaffId = null;
         ticket.CallAlertsSent = 1;
         ticket.LastCallAlertAt = ticket.CalledAt;
         await db.SaveChangesAsync(ct);
@@ -706,8 +711,26 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (ticket.Status is not (TicketStatuses.Called or TicketStatuses.Arrived))
             throw InvalidTransition(ticket, "بدء المعاينة");
         await EnsurePaidAsync(ticket, ct);
-        if (await db.QueueTickets.AnyAsync(t => t.DoctorId == ticket.DoctorId && t.Status == TicketStatuses.InRoom && t.TicketId != ticket.TicketId, ct))
-            throw new AppException(409, "DOCTOR_BUSY", "يوجد مريض داخل الغرفة", "أنهِ المعاينة الحالية أولاً");
+        // «تم، أنا قادم» ليس شرطاً للدخول: يكفي أن يكون مستدعى أو واصلاً ومدفوعاً.
+        // معاينة مفتوحة للطبيب نفسه في أي وجبة (حتى وجبة سابقة لم تُغلق) تمنع بدء أخرى؛ تُعاد تفاصيلها ليعرضها الطبيب ويغلقها.
+        var busy = await db.QueueTickets.AsNoTracking().Include(t => t.Patient).Include(t => t.Session)
+            .Where(t => t.DoctorId == ticket.DoctorId && t.Status == TicketStatuses.InRoom && t.TicketId != ticket.TicketId)
+            .OrderBy(t => t.StartedAt).FirstOrDefaultAsync(ct);
+        if (busy is not null)
+        {
+            var otherSession = busy.SessionId != ticket.SessionId;
+            throw new AppException(409, "DOCTOR_BUSY",
+                otherSession ? $"معاينة سابقة لم تُغلق: {busy.TicketNumber} ({busy.Patient?.FullName}) يوم {busy.Session?.SessionDate:yyyy-MM-dd}" : "يوجد مريض داخل الغرفة",
+                "أنهِ المعاينة الحالية أولاً")
+            {
+                Extensions = new Dictionary<string, object?>
+                {
+                    ["ticket_id"] = busy.TicketId, ["ticket_number"] = busy.TicketNumber, ["patient_name"] = busy.Patient?.FullName,
+                    ["session_id"] = busy.SessionId, ["session_date"] = busy.Session?.SessionDate, ["started_at"] = busy.StartedAt,
+                    ["other_session"] = otherSession,
+                },
+            };
+        }
         var now = op.Now;
         ticket.Status = TicketStatuses.InRoom;
         ticket.CalledAt ??= now;
@@ -719,6 +742,27 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
     }
 
     public async Task<TicketActionResponse> CompleteAsync(Guid ticketId, CancellationToken ct) => await CompleteAsync(ticketId, null, ct);
+
+    /// <summary>
+    /// «حضر»: الاستقبال يؤكد حضور المستدعى نيابة عنه (مريض بلا هاتف أو بلا تطبيق، أو لم يضغط «تم، أنا قادم»).
+    /// بعده تختفي «لم يرد» وتتوقف تنبيهات التكرار. ليس شرطاً للدخول: الطبيب يبدأ المعاينة بدونه أيضاً.
+    /// </summary>
+    public Task<TicketActionResponse> MarkPresentAsync(Guid ticketId, CancellationToken ct) => LockedAsync(ticketId, async () =>
+    {
+        var (ticket, session, _) = await LoadTicketAsync(ticketId, ct);
+        if (ticket.Status != TicketStatuses.Called) throw InvalidTransition(ticket, "«حضر»");
+        if (ticket.CallAcknowledgedAt is null)
+        {
+            var now = op.Now;
+            ticket.CallAcknowledgedAt = now.AddTicks(-(now.Ticks % 10));
+            ticket.CallAckBy = "staff";
+            ticket.CallAckStaffId = current.StaffUserId;
+            audit.Add("TICKET_PRESENT_CONFIRMED", "queue_ticket", ticket.TicketId, after: new { by = "staff" });
+            await db.SaveChangesAsync(ct);
+            await notifier.SessionChangedAsync(session.SessionId, ct);
+        }
+        return ToAction(ticket);
+    }, ct);
 
     public Task<TicketActionResponse> CompleteAsync(Guid ticketId, CompleteTicketRequest? req, CancellationToken ct) =>
         LockedAsync(ticketId, () => CompleteCoreAsync(ticketId, req, ct), ct);
@@ -935,6 +979,8 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         ticket.ReturnedAt = now;
         ticket.CalledAt = null;
         ticket.CallAcknowledgedAt = null;
+        ticket.CallAckBy = null;
+        ticket.CallAckStaffId = null;
         var log = await ConversionLogAsync("return_same_ticket", ticket, null, now, ct);
         log["via"] = via;
         log["external_marked"] = marked;
@@ -1117,5 +1163,6 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         new(409, "INVALID_TICKET_STATE", "لا يمكن تنفيذ العملية على التذكرة بحالتها الحالية", $"{action} غير متاح والتذكرة بحالة {t.Status}");
 
     private static TicketActionResponse ToAction(QueueTicket t) =>
-        new(t.TicketId, t.TicketNumber, t.Status, t.Priority, t.QueuePosition, t.EstimatedTime, t.CalledAt, t.StartedAt, t.CompletedAt);
+        new(t.TicketId, t.TicketNumber, t.Status, t.Priority, t.QueuePosition, t.EstimatedTime, t.CalledAt, t.StartedAt, t.CompletedAt)
+            { CallAcknowledgedAt = t.CallAcknowledgedAt, CallAckBy = t.CallAckBy };
 }

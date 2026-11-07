@@ -1621,3 +1621,11 @@ ALTER TABLE doctor_sessions ADD COLUMN IF NOT EXISTS delay_reason       TEXT;
 ALTER TABLE doctor_sessions ADD COLUMN IF NOT EXISTS delay_announced_at TIMESTAMPTZ;
 ALTER TABLE doctor_sessions DROP CONSTRAINT IF EXISTS doctor_sessions_delay_minutes_check;
 ALTER TABLE doctor_sessions ADD CONSTRAINT doctor_sessions_delay_minutes_check CHECK (delay_minutes BETWEEN 0 AND 240);
+
+-- =============================================================================
+-- ترحيل 029: «حضر» من الاستقبال (من أكّد حضور المستدعى: patient | staff)
+-- =============================================================================
+ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS call_ack_by       TEXT;
+ALTER TABLE queue_tickets ADD COLUMN IF NOT EXISTS call_ack_staff_id UUID;
+ALTER TABLE queue_tickets DROP CONSTRAINT IF EXISTS queue_tickets_call_ack_by_check;
+ALTER TABLE queue_tickets ADD CONSTRAINT queue_tickets_call_ack_by_check CHECK (call_ack_by IS NULL OR call_ack_by IN ('patient', 'staff'));

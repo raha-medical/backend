@@ -184,6 +184,10 @@ public class QueueTicket
     public DateTimeOffset? TurnSoonNotifiedAt { get; set; }
     /// <summary>ضغط المريض "أنا قادم" على تنبيه الاستدعاء. يُصفّر عند إعادة الاستدعاء.</summary>
     public DateTimeOffset? CallAcknowledgedAt { get; set; }
+    /// <summary>من أكّد الحضور بعد الاستدعاء (الترحيل 029): patient («تم، أنا قادم» في التطبيق) | staff (زر «حضر» في الاستقبال).</summary>
+    public string? CallAckBy { get; set; }
+    /// <summary>الموظف الذي ضغط «حضر».</summary>
+    public Guid? CallAckStaffId { get; set; }
     /// <summary>عدد تنبيهات الاستدعاء المرسلة (الأول + التكرار).</summary>
     public short CallAlertsSent { get; set; }
     public DateTimeOffset? LastCallAlertAt { get; set; }

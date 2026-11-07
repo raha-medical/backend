@@ -1788,6 +1788,12 @@
 
 * يتكرر التنبيه كل دقيقة (`queue.call_repeat`) حتى `queue.call_alert_repeats` مرات (الافتراضي 3) ما لم يضغط المريض "أنا قادم" أو يدخل الغرفة أو يُتخطى. كل إعادة استدعاء تبدأ تنبيهاً جديداً.
 * في `GET /queue/live` لكل تذكرة: `call_acknowledged_at` (null = لم يؤكد) و`call_alerts_sent`، ويظهر عند الطبيب والاستقبال "قادم".
+* **رد المراجع على «حان دورك» (feature/patient-alerts):** لكل تذكرة في `GET /queue/live` أيضاً `call_ack_status` و`call_ack_deadline`:
+  * `call_ack_status`: `acknowledged` (أكّد أنه قادم) | `waiting` (ضمن المهلة) | `no_response` (لم يرد بعد المهلة) | `null` (غير مستدعى، أو المراجع بلا حساب في التطبيق).
+  * `call_ack_deadline` = `called_at` + `queue.call_ack_timeout_minutes`. الواجهة تقلب «بانتظار رده» إلى «لم يرد» عند هذا الوقت دون انتظار حدث. الضغط بعد المهلة مقبول ويصير `acknowledged`.
+  * على مستوى الوجبة: `call_ack_timeout_minutes`.
+  * إعداد الفرع `queue.call_ack_timeout_minutes`: الافتراضي 3، من 1 إلى 30 دقيقة (`GET/PATCH /branches/{id}/settings`).
+* **تطبيق المراجع:** أي تذكرة في `GET /me/queue-tickets` بحالة `called` و`call_acknowledged_at = null` تُظهر شاشة «حان دورك» الكاملة بنغمة متكررة واهتزاز حتى `acknowledge-call` (وعند فتح التطبيق أو عودته من الخلفية تُقرأ القائمة فوراً). حدث `notification.created` يُصدر نغمة قصيرة وتنبيهاً منبثقاً (عدا `queue.called` و`queue.call_repeat`)، و«كتم صوت الإشعارات» تفضيل محلي على الجهاز لا يكتم «حان دورك».
 
 `POST /api/v1/me/queue-tickets/{ticket_id}/acknowledge-call` (تطبيق المريض، زر "أنا قادم")
 * **Response (200):** `{ "ticket_id": "...", "status": "called", "call_acknowledged_at": "..." }`. الضغط مرة ثانية يرجع نفس الوقت.
@@ -2910,6 +2916,7 @@
 | `queue.turn_soon_ahead` | 3 | 1 إلى 20 مريض |
 | `queue.auto_call_next` | 0 | 0 أو 1 |
 | `queue.call_alert_repeats` | 3 | 0 إلى 10 |
+| `queue.call_ack_timeout_minutes` | 3 | 1 إلى 30 دقيقة (بعدها «لم يرد» للاستقبال) |
 | `queue.call_next_by` | `both` | `doctor` \| `reception` \| `both` |
 
 * إعدادات الاختيار (مثل `queue.call_next_by`) تعرض في القائمة: `value` رقم الخيار (1 إلى 3)، و`value_text` القيمة النصية، و`global_value_text`، و`options: [ { "value": "doctor", "label_ar": "الطبيب فقط" }, ... ]`. في PATCH ترسل النص (`"queue.call_next_by": "doctor"`) أو رقم الخيار. الإعدادات الرقمية لا تتغير.

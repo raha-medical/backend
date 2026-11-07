@@ -1,5 +1,9 @@
 # سجل التغييرات (backend)
 
+## feature/patient-alerts (2026-11-07)
+- رد المراجع على «حان دورك» في `GET /queue/live`: `call_ack_status` (acknowledged | waiting | no_response) و`call_ack_deadline`، و`call_ack_timeout_minutes` للوجبة.
+- إعداد الفرع `queue.call_ack_timeout_minutes` (3، من 1 إلى 30).
+
 ## fix/notifications (2026-11-07) — الترحيل 027
 - «اقترب دورك» يُرسل يوم الموعد فقط وبعد بدء العمل (كان يُرسل فور الحجز لأيام قادمة).
 - نص إلغاء الطبيب حسب الدفع: الدافع تُذكر له الخيارات (إعادة الحجز، رصيد، استرجاع) مع رابط `booking_cancel_options`، وغير الدافع بلا مبلغ ويُقترح عليه إعادة الحجز.

@@ -87,6 +87,7 @@ public class BranchSettingsService(IAppDbContext db, ICurrentUser current, IAudi
         new(SettingsReader.NoShowGraceMinutes, "مهلة المحجوز المتأخر قبل أن يُعامل كمتأخر (يمكن تخصيصها لكل طبيب)", "دقيقة", 20, 0, 180),
         new(SettingsReader.AutoCloseAfterMinutes, "إغلاق التسجيل تلقائياً بعد نهاية الوجبة الفعلية", "دقيقة", 120, 0, 600),
         new(SettingsReader.ExtraMaxPercent, "أقصى عدد إضافي فوق السعة (نسبة من سعة الوجبة، 0 = بلا حد)", "%", 50, 0, 300),
+        new(SettingsReader.CallAckTimeoutMinutes, "مهلة رد المراجع على «حان دورك» قبل أن يظهر للاستقبال «لم يرد»", "دقيقة", 3, 1, 30),
         new(SettingsReader.CallAlertRepeats, "عدد مرات تكرار تنبيه \"تفضل للدخول\" (كل دقيقة) إذا لم يضغط المريض \"أنا قادم\"", "مرة", 3, 0, 10),
         new(SettingsReader.AssistantEnabled, "المساعد الذكي في تطبيق المراجعين (1 مفعل، 0 موقوف)", "", 1, 0, 1) { GlobalOnly = true },
         new(SettingsReader.AssistantDailyLimit, "حد رسائل المساعد الذكي لكل حساب مراجع في اليوم (رسائل الطوارئ لا تُحسب)", "رسالة", 30, 1, 500) { GlobalOnly = true },

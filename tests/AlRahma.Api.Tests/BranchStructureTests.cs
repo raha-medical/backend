@@ -1,4 +1,8 @@
 using System.Text.Json.Nodes;
+using System.Net.Http.Headers;
+using AlRahma.Application.Abstractions;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace AlRahma.Api.Tests;
@@ -7,6 +11,10 @@ namespace AlRahma.Api.Tests;
 [Collection(ApiCollection.Name)]
 public class BranchStructureTests(TestApp app)
 {
+    private sealed class FixedClock(DateTimeOffset now) : IClock
+    {
+        public DateTimeOffset UtcNow => now;
+    }
     private static readonly string[] Week = ["sat", "sun", "mon", "tue", "wed", "thu", "fri"];
     private static DateTime BaghdadNow => DateTime.UtcNow.AddHours(3);
     private static string TodayCode => Week[((int)BaghdadNow.DayOfWeek + 1) % 7];
@@ -89,7 +97,14 @@ public class BranchStructureTests(TestApp app)
     public async Task Branch_grid_shows_managers_department_counts_and_live_status()
     {
         Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
-        var admin = app.Client(await app.AdminTokenAsync());
+        // Exercise opening hours at Baghdad noon, including when CI runs in the
+        // 23:59 closing minute. Keep JWT validation on the actual system clock.
+        var baghdadDate = DateOnly.FromDateTime(BaghdadNow);
+        var noon = new DateTimeOffset(baghdadDate.ToDateTime(new TimeOnly(12, 0)), TimeSpan.FromHours(3)).ToUniversalTime();
+        await using var timedApp = app.Factory.WithWebHostBuilder(b =>
+            b.ConfigureTestServices(s => s.AddSingleton<IClock>(new FixedClock(noon))));
+        using var admin = timedApp.CreateClient();
+        admin.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", await app.AdminTokenAsync());
         var code = "G" + Random.Shared.Next(10000, 99999);
         // اليوم الحالي مغلق، وبقية الأيام دوام كامل: الفرع "مغلق الآن" مهما كانت الساعة
         var schedule = Week.Select(d => d == TodayCode

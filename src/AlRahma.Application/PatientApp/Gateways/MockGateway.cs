@@ -174,13 +174,13 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             var wallet = NormalizeWallet(req.WalletNumber);
             new Validator().Check(wallet is not null, "wallet_number", "رقم المحفظة غير صحيح (مثال 07800000001)")
                 .Check(req.Pin is { Length: 4 } && req.Pin.All(char.IsDigit), "pin", "الرمز السري 4 أرقام").ThrowIfInvalid();
-            if (!MockGatewayTestData.Wallets.TryGetValue(wallet!, out outcome!))
-                throw new AppException(422, "ACCOUNT_NOT_FOUND", "رقم المحفظة غير مسجل في زين كاش");
+            var knownWallet = MockGatewayTestData.Wallets.TryGetValue(wallet!, out outcome!);
+            if (!knownWallet) outcome = MockGatewayTestData.Outcomes.Success;
             if (outcome == MockGatewayTestData.Outcomes.GatewayError)
                 throw new AppException(503, "GATEWAY_UNAVAILABLE", "تعذر الاتصال بالبوابة", "أعد المحاولة بعد قليل");
             tx.TestAccount = wallet;
             tx.AccountMasked = wallet![..5] + "****" + wallet[^4..];
-            secretOk = req.Pin == MockGatewayTestData.ZainCashPin;
+            secretOk = !knownWallet || req.Pin == MockGatewayTestData.ZainCashPin;
             if (!secretOk) return await WrongSecretAsync(tx, "WRONG_PIN", "الرمز السري غير صحيح", ct);
         }
         else
@@ -189,14 +189,18 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             new Validator().Check(card.Length == 16, "card_number", "رقم البطاقة 16 رقماً")
                 .Check(TryExpiry(req.Expiry, out _), "expiry", "تاريخ الانتهاء بصيغة MM/YY")
                 .Check(req.Cvv is { Length: 3 } && req.Cvv.All(char.IsDigit), "cvv", "CVV ثلاثة أرقام").ThrowIfInvalid();
-            if (!MockGatewayTestData.Cards.TryGetValue(card, out outcome!))
-                throw new AppException(422, "CARD_NOT_FOUND", "البطاقة غير معروفة لدى كي كارد");
+            var knownCard = MockGatewayTestData.Cards.TryGetValue(card, out outcome!);
+            if (!knownCard)
+            {
+                new Validator().Check(IsValidTestCard(card), "card_number", "رقم البطاقة لا يجتاز فحص Luhn").ThrowIfInvalid();
+                outcome = MockGatewayTestData.Outcomes.Success;
+            }
             tx.TestAccount = card;
             tx.AccountMasked = card[..4] + " **** **** " + card[^4..];
             TryExpiry(req.Expiry, out var exp);
             if (exp < new DateOnly(now.Year, now.Month, 1))
                 return await FinishAsync(tx, GatewayStatuses.Failed, "CARD_EXPIRED", ct);
-            secretOk = req.Expiry!.Trim() == MockGatewayTestData.QiExpiry && req.Cvv == MockGatewayTestData.QiCvv;
+            secretOk = !knownCard || (req.Expiry!.Trim() == MockGatewayTestData.QiExpiry && req.Cvv == MockGatewayTestData.QiCvv);
             if (!secretOk) return await WrongSecretAsync(tx, "WRONG_CARD_DATA", "تاريخ الانتهاء أو CVV غير صحيح", ct);
         }
 
@@ -230,7 +234,8 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             throw new AppException(422, "WRONG_OTP", "رمز التحقق غير صحيح", $"المحاولات المتبقية {MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts}")
                 { Extensions = new Dictionary<string, object?> { ["attempts_left"] = MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts } };
         }
-        var outcome = tx.Provider == "zaincash" ? MockGatewayTestData.Wallets[tx.TestAccount!] : MockGatewayTestData.Cards[tx.TestAccount!];
+        var fixtures = tx.Provider == "zaincash" ? MockGatewayTestData.Wallets : MockGatewayTestData.Cards;
+        var outcome = fixtures.GetValueOrDefault(tx.TestAccount ?? "", MockGatewayTestData.Outcomes.Success);
         if (outcome == MockGatewayTestData.Outcomes.Timeout)
         {
             // البوابة لا ترد: المعاملة تبقى pending حتى تنتهي مهلتها، ثم يعطي الاستعلام failed/TIMEOUT
@@ -307,6 +312,19 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
         var d = new string((raw ?? "").Where(char.IsDigit).ToArray());
         if (d.StartsWith("07") && d.Length == 11) d = "964" + d[1..];
         return d.Length == 13 && d.StartsWith("9647") ? d : null;
+    }
+
+    public static bool IsValidTestCard(string card)
+    {
+        if (card.Length != 16 || card.Any(c => c < '0' || c > '9')) return false;
+        var sum = 0;
+        for (var i = card.Length - 1; i >= 0; i--)
+        {
+            var n = card[i] - '0';
+            if ((card.Length - 1 - i) % 2 == 1) { n *= 2; if (n > 9) n -= 9; }
+            sum += n;
+        }
+        return sum % 10 == 0 && card.Any(c => c != '0');
     }
 
     private static bool TryExpiry(string? raw, out DateOnly month)

@@ -48,6 +48,10 @@ public class QueueController(QueueService queue, DeviceService devices) : Contro
     public Task<TicketActionResponse> CallNext([FromQuery(Name = "doctor_id")] Guid doctorId, CancellationToken ct) =>
         queue.CallNextAsync(doctorId, ct);
 
+    /// <summary>حضر: تأكيد الموظف نيابة عن المراجع، لا يبدأ المعاينة ولا يشترط تطبيقاً.</summary>
+    [HttpPost("api/v1/queue/tickets/{ticketId:guid}/present")]
+    public Task<TicketActionResponse> Present(Guid ticketId, CancellationToken ct) => queue.ConfirmPresenceAsync(ticketId, ct);
+
     [HttpPost("api/v1/queue/tickets/{ticketId:guid}/start")]
     [Authorize(Roles = Roles.Doctor)]
     [ProducesResponseType<TicketActionResponse>(200)]

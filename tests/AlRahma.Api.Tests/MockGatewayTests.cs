@@ -6,8 +6,13 @@ namespace AlRahma.Api.Tests;
 public static class MockPay
 {
     public const string Wallet = "07800000001", InsufficientWallet = "07800000002", TimeoutWallet = "07800000003", ErrorWallet = "07800000004";
-    public const string Pin = "1234", Otp = "1111";
+    public const string Pin = "1234";
     public const string Card = "4111111111111111", InsufficientCard = "4111111111111112", DeclinedCard = "4111111111111113";
+
+    /// <summary>الرمز العشوائي من رسالة الـ SMS التجريبية في رد البوابة (sandbox_otp).</summary>
+    public static string Otp(ApiResult page) => page.Body!["sandbox_otp"]!.GetValue<string>();
+    /// <summary>رمز خاطئ مضمون: نفس الطول بأول رقم مختلف.</summary>
+    public static string WrongOtp(ApiResult page) { var o = Otp(page); return (char)('0' + (o[0] - '0' + 1) % 10) + o[1..]; }
 
     public static async Task<string> ReferenceAsync(HttpClient me, Guid opId) =>
         (await Api.GetAsync(me, $"/api/v1/online-payments/{opId}")).Body!["provider_reference"]!.GetValue<string>();
@@ -18,7 +23,7 @@ public static class MockPay
         var reference = await ReferenceAsync(me, opId);
         var c = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { wallet_number = Wallet, pin = Pin });
         if (c.Status != 200) throw new InvalidOperationException("credentials: " + c.Raw);
-        var o = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = Otp });
+        var o = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = Otp(c) });
         if (o.Status != 200) throw new InvalidOperationException("otp: " + o.Raw);
         return await Api.PostAsync(me, $"/api/v1/online-payments/{opId}/verify");
     }
@@ -44,6 +49,12 @@ public class MockGatewayTests(TestApp app)
     /// <summary>مريض بتطبيق وحجز اليوم غير مدفوع.</summary>
     private async Task<(HttpClient Me, Guid Patient, Guid Booking)> BookingAsync()
     {
+        var (me, patient, booking, _) = await BookingWithClinicAsync();
+        return (me, patient, booking);
+    }
+
+    private async Task<(HttpClient Me, Guid Patient, Guid Booking, ClinicSetup S)> BookingWithClinicAsync()
+    {
         var s = await new QueueTests(app).SetupAsync();
         var phone = "0775" + Random.Shared.Next(1000000, 9999999);
         var p = await Api.PostAsync(s.Reception, "/api/v1/patients", new { full_name = "مريض بوابة", phone_number = phone, gender = "female", approx_age = 30 }, Guid.NewGuid());
@@ -55,7 +66,7 @@ public class MockGatewayTests(TestApp app)
         var sessions = await Api.GetAsync(s.Admin, $"/api/v1/doctors/{s.DoctorId}/sessions?from={today:yyyy-MM-dd}&to={today:yyyy-MM-dd}");
         var booking = await Api.PostAsync(me, "/api/v1/bookings", new { patient_id = patient, session_id = Id(sessions.Body!["items"]![0], "session_id"), visit_kind = "auto" }, Guid.NewGuid());
         Assert.True(booking.Status == 201, booking.Raw);
-        return (me, patient, Id(booking.Body, "booking_id"));
+        return (me, patient, Id(booking.Body, "booking_id"), s);
     }
 
     private static async Task<(Guid Op, string Ref)> CreateAsync(HttpClient me, Guid patient, Guid booking, string provider)
@@ -93,9 +104,17 @@ public class MockGatewayTests(TestApp app)
         Assert.True(cred.Status == 200, cred.Raw);
         Assert.Equal("otp", S(cred.Body, "step"));
         Assert.Equal(4, cred.Body!["otp_length"]!.GetValue<int>());
-        Assert.Equal("WRONG_OTP", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = "2222" })).Code);
-        var paid = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = MockPay.Otp });
+        // الرمز عشوائي ويصل كرسالة SMS تجريبية فيها الرمز والمبلغ
+        var code = MockPay.Otp(cred);
+        Assert.Matches("^[0-9]{4}$", code);
+        Assert.Contains(code, S(cred.Body, "sandbox_sms"));
+        Assert.NotNull(cred.Body!["otp_sent_at"]);
+        Assert.Equal(code, MockPay.Otp(await Api.GetAsync(me, $"/api/v1/mock-gateway/{reference}")));
+        Assert.Equal("WRONG_OTP", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = MockPay.WrongOtp(cred) })).Code);
+        var paid = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = code });
         Assert.Equal("paid", S(paid.Body, "status"));
+        Assert.Null(paid.Body!["sandbox_otp"]); // بعد انتهاء المعاملة لا يبقى الرمز
+        Assert.True(await app.ScalarAsync<bool>($"SELECT otp_code IS NULL FROM mock_gateway_transactions WHERE reference = '{reference}'"));
 
         // البوابة دفعت لكن النظام لم يستعلم بعد: الحجز غير مدفوع
         Assert.Equal("unpaid", await BookingPaymentAsync(me, booking));
@@ -130,13 +149,14 @@ public class MockGatewayTests(TestApp app)
 
         // OTP منتهٍ ثم إعادة الإرسال، ثم OTP خاطئ 3 مرات
         var (op3, r3) = await CreateAsync(me, patient, booking, "zaincash");
-        await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/credentials", new { wallet_number = MockPay.Wallet, pin = MockPay.Pin });
+        var c3 = await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/credentials", new { wallet_number = MockPay.Wallet, pin = MockPay.Pin });
         await app.ExecAsync($"UPDATE mock_gateway_transactions SET otp_expires_at = now() - interval '1 second' WHERE reference = '{r3}'");
-        Assert.Equal("OTP_EXPIRED", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = MockPay.Otp })).Code);
-        Assert.Equal(200, (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp/resend")).Status);
+        Assert.Equal("OTP_EXPIRED", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = MockPay.Otp(c3) })).Code);
+        var resent = await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp/resend");
+        Assert.Equal(200, resent.Status);
         Assert.Equal("OTP_RESEND_TOO_SOON", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp/resend")).Code);
-        for (var i = 0; i < 2; i++) Assert.Equal("WRONG_OTP", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = "9999" })).Code);
-        Assert.Equal("OTP_ATTEMPTS_EXCEEDED", S((await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = "9999" })).Body, "failure_code"));
+        for (var i = 0; i < 2; i++) Assert.Equal("WRONG_OTP", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = MockPay.WrongOtp(resent) })).Code);
+        Assert.Equal("OTP_ATTEMPTS_EXCEEDED", S((await Api.PostAsync(me, $"/api/v1/mock-gateway/{r3}/otp", new { otp = MockPay.WrongOtp(resent) })).Body, "failure_code"));
         Assert.Equal("failed", S((await Api.PostAsync(me, $"/api/v1/online-payments/{op3}/verify")).Body, "status"));
 
         // المراجع ألغى
@@ -146,8 +166,8 @@ public class MockGatewayTests(TestApp app)
 
         // انتهاء المهلة: البوابة لا ترد، المعاملة معلقة حتى المهلة ثم TIMEOUT
         var (op5, r5) = await CreateAsync(me, patient, booking, "zaincash");
-        await Api.PostAsync(me, $"/api/v1/mock-gateway/{r5}/credentials", new { wallet_number = MockPay.TimeoutWallet, pin = MockPay.Pin });
-        Assert.Equal("GATEWAY_TIMEOUT", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r5}/otp", new { otp = MockPay.Otp })).Code);
+        var c5 = await Api.PostAsync(me, $"/api/v1/mock-gateway/{r5}/credentials", new { wallet_number = MockPay.TimeoutWallet, pin = MockPay.Pin });
+        Assert.Equal("GATEWAY_TIMEOUT", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{r5}/otp", new { otp = MockPay.Otp(c5) })).Code);
         Assert.Equal("pending", S((await Api.PostAsync(me, $"/api/v1/online-payments/{op5}/verify")).Body, "status"));
         await app.ExecAsync($"UPDATE mock_gateway_transactions SET expires_at = now() - interval '1 second' WHERE reference = '{r5}'; UPDATE online_payments SET expires_at = now() - interval '1 second' WHERE online_payment_id = '{op5}'");
         var v5 = await Api.PostAsync(me, $"/api/v1/online-payments/{op5}/verify");
@@ -179,9 +199,53 @@ public class MockGatewayTests(TestApp app)
         var c = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { card_number = "4111 1111 1111 1111", expiry = "12/30", cvv = "123" });
         Assert.True(c.Status == 200, c.Raw);
         Assert.Equal(6, c.Body!["otp_length"]!.GetValue<int>());
-        Assert.Equal("paid", S((await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = "123456" })).Body, "status"));
+        Assert.Matches("^[0-9]{6}$", MockPay.Otp(c));
+        Assert.Equal("paid", S((await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/otp", new { otp = MockPay.Otp(c) })).Body, "status"));
         Assert.Equal("succeeded", S((await Api.PostAsync(me, $"/api/v1/online-payments/{op}/verify")).Body, "status"));
         Assert.Equal("paid", await BookingPaymentAsync(me, booking));
+    }
+
+    /// <summary>طابور الاستقبال لهذا الحجز قبل تثبيت الحضور.</summary>
+    private static async Task<System.Text.Json.Nodes.JsonNode> LiveItemAsync(ClinicSetup s, Guid booking)
+    {
+        var live = await Api.GetAsync(s.Reception, $"/api/v1/queue/live?doctor_id={s.DoctorId}");
+        Assert.True(live.Status == 200, live.Raw);
+        return live.Body!["items"]!.AsArray().First(i => i!["booking_id"]?.GetValue<Guid?>() == booking)!;
+    }
+
+    [SkippableFact]
+    public async Task Reception_queue_shows_online_full_payment_and_deposit_before_check_in()
+    {
+        Skip.If(TestApp.ServerUrl is null, "TEST_DATABASE_URL not set");
+        // دفع كامل من التطبيق: الاستقبال يرى «مدفوع» وإلكتروني قبل الحضور (لا فاتورة بعد)
+        var (me, patient, booking, s) = await BookingWithClinicAsync();
+        var before = await LiveItemAsync(s, booking);
+        Assert.Equal("not_billed", S(before, "payment_status"));
+        Assert.False(before["paid_online"]!.GetValue<bool>());
+        var (op, _) = await CreateAsync(me, patient, booking, "zaincash");
+        Assert.Equal("succeeded", S((await MockPay.SucceedAsync(me, op)).Body, "status"));
+        var paid = await LiveItemAsync(s, booking);
+        Assert.Equal("paid", S(paid, "payment_status"));
+        Assert.True(paid["paid_online"]!.GetValue<bool>());
+        Assert.Equal(0, paid["deposit_amount"]!.GetValue<long>());
+
+        // عربون: «عربون» بمبلغه، ويبقى كذلك بعد الحضور حتى يُحصّل المتبقي
+        var (me2, patient2, booking2, s2) = await BookingWithClinicAsync();
+        var dep = await Api.PostAsync(me2, "/api/v1/online-payments", new { purpose = "booking_deposit", patient_id = patient2, booking_id = booking2, provider = "qicard" }, Guid.NewGuid());
+        Assert.True(dep.Status == 201, dep.Raw);
+        var depId = Id(dep.Body, "online_payment_id");
+        var amount = dep.Body!["amount"]!.GetValue<long>();
+        var c = await Api.PostAsync(me2, $"/api/v1/mock-gateway/{S(dep.Body, "provider_reference")}/credentials", new { card_number = MockPay.Card, expiry = "12/30", cvv = "123" });
+        Assert.Equal("paid", S((await Api.PostAsync(me2, $"/api/v1/mock-gateway/{S(dep.Body, "provider_reference")}/otp", new { otp = MockPay.Otp(c) })).Body, "status"));
+        Assert.Equal("succeeded", S((await Api.PostAsync(me2, $"/api/v1/online-payments/{depId}/verify")).Body, "status"));
+        Assert.Equal("deposit_paid", await BookingPaymentAsync(me2, booking2));
+        var partial = await LiveItemAsync(s2, booking2);
+        Assert.Equal("partial", S(partial, "payment_status"));
+        Assert.Equal(amount, partial["deposit_amount"]!.GetValue<long>());
+        Assert.True(partial["paid_online"]!.GetValue<bool>());
+        var checkIn = await Api.PostAsync(s2.Reception, "/api/v1/queue/check-in", new { booking_id = booking2 }, Guid.NewGuid());
+        Assert.True(checkIn.Status is 200 or 201, checkIn.Raw);
+        Assert.Equal("partial", S(await LiveItemAsync(s2, booking2), "payment_status"));
     }
 
     [SkippableFact]

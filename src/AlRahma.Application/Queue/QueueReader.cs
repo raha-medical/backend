@@ -27,6 +27,10 @@ public record QueueItemDto(Guid TicketId, string TicketNumber, Guid PatientId, s
     public bool IsExtra { get; init; }
     /// <summary>مجموع البنود غير المدفوعة للمراجع في هذا الفرع: الكشفية وما طلبه الطبيب بعدها.</summary>
     public long OutstandingAmount { get; init; }
+    /// <summary>عربون الحجز المدفوع إلكترونياً (رصيد booking_deposit لهذا الحجز)، ويُطرح من الكشفية عند التحصيل. 0 بلا عربون.</summary>
+    public long DepositAmount { get; init; }
+    /// <summary>دُفع الحجز من التطبيق (كاملاً أو عربوناً): يُعرض «إلكتروني» بجانب حالة الدفع.</summary>
+    public bool PaidOnline { get; init; }
     /// <summary>حالة العرض: awaiting_results | ready_to_return | returning | awaiting_payment (حاضر — بانتظار الدفع) | null.</summary>
     public string? DisplayState { get; init; }
     /// <summary>نص الشارة: «بانتظار المختبر والأشعة» / «جاهز للعودة» / «عائد بالنتائج» / «حاضر — بانتظار الدفع».</summary>
@@ -89,6 +93,28 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
                 .Join(db.Invoices.AsNoTracking().Where(v => v.BranchId == session.BranchId && v.Status != InvoiceStatuses.Void && patientIds.Contains(v.PatientId)), i => i.InvoiceId, v => v.InvoiceId, (i, v) => new { v.PatientId, i.NetPrice })
                 .ToListAsync(ct))
             .GroupBy(x => x.PatientId).ToDictionary(g => g.Key, g => g.Sum(x => x.NetPrice));
+        // قبل تثبيت الحضور لا فاتورة: حالة الدفع من الحجز نفسه (دفع كاملاً أو عربوناً من التطبيق)، فيراها الاستقبال فوراً
+        var bookingIds = tickets.Where(t => t.BookingId != null).Select(t => t.BookingId!.Value).ToList();
+        var bookingPay = bookingIds.Count == 0 ? new Dictionary<Guid, string>()
+            : await db.Bookings.AsNoTracking().Where(b => bookingIds.Contains(b.BookingId)).ToDictionaryAsync(b => b.BookingId, b => b.PaymentStatus, ct);
+        var deposits = bookingIds.Count == 0 ? new Dictionary<Guid, long>()
+            : (await db.PatientCredits.AsNoTracking()
+                    .Where(c => c.BookingId != null && bookingIds.Contains(c.BookingId.Value) && c.Kind == "booking_deposit" && c.Amount > 0)
+                    .Select(c => new { BookingId = c.BookingId!.Value, c.Amount }).ToListAsync(ct))
+                .GroupBy(c => c.BookingId).ToDictionary(g => g.Key, g => g.Sum(c => c.Amount));
+        var paidOnline = bookingIds.Count == 0 ? new HashSet<Guid>()
+            : (await db.OnlinePayments.AsNoTracking()
+                    .Where(o => o.BookingId != null && bookingIds.Contains(o.BookingId.Value) && o.Status == OnlinePaymentStatuses.Succeeded)
+                    .Select(o => o.BookingId!.Value).ToListAsync(ct)).ToHashSet();
+        string Pay(QueueTicket t, InvoiceItem? item)
+        {
+            var status = QueueEngine.PaymentStatusOf(item);
+            var booking = t.BookingId is { } b ? bookingPay.GetValueOrDefault(b) : null;
+            if (item is null)
+                return booking switch { PaymentStatuses.Paid => "paid", PaymentStatuses.DepositPaid => "partial", _ => status };
+            return status == "unpaid" && booking == PaymentStatuses.DepositPaid ? "partial" : status;
+        }
+
         var awaitingIds = tickets.Where(t => t.Status == TicketStatuses.AwaitingResults).Select(t => t.TicketId).ToList();
         // رد المراجع على الاستدعاء: فقط لمن له حساب في التطبيق (غيره لا يستطيع الضغط على «تم»)
         var calledPatients = tickets.Where(t => t.Status == TicketStatuses.Called).Select(t => t.PatientId).Distinct().ToList();
@@ -151,12 +177,14 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
                 var display = Display(t, item);
                 var ack = Ack(t);
                 return new QueueItemDto(t.TicketId, t.TicketNumber, t.PatientId, t.Patient!.FullName, t.BookingId, t.Source, t.Priority,
-                    t.Status, QueueEngine.PaymentStatusOf(item), item?.InvoiceId, t.QueuePosition, t.EstimatedTime,
+                    t.Status, Pay(t, item), item?.InvoiceId, t.QueuePosition, t.EstimatedTime,
                     t.ArrivedAt, t.CalledAt, t.StartedAt, t.CompletedAt)
                 {
                     CallAcknowledgedAt = t.CallAcknowledgedAt, CallAlertsSent = t.CallAlertsSent, CallAckStatus = ack.Status, CallAckDeadline = ack.Deadline,
                     OnTheWayAt = t.OnTheWayAt, OnTheWayEtaMinutes = t.OnTheWayEtaMinutes, IsExtra = t.IsExtra,
                     OutstandingAmount = dues.GetValueOrDefault(t.PatientId),
+                    DepositAmount = t.BookingId is { } db1 ? deposits.GetValueOrDefault(db1) : 0,
+                    PaidOnline = t.BookingId is { } db2 && paidOnline.Contains(db2),
                     DisplayState = display.State, DisplayStateAr = display.Ar, AwaitingServices = display.Services,
                     AwaitingSince = t.AwaitingSince, ReturnedAt = t.ReturnedAt, OriginalTicketId = t.OriginalTicketId,
                 };
@@ -213,6 +241,8 @@ public static class BookingChangeActions
     public const string Rescheduled = "rescheduled";
     public const string Skipped = "skipped";
     public const string NoShow = "no_show";
+    /// <summary>دُفع الحجز من التطبيق (payment_status = paid أو deposit_paid).</summary>
+    public const string Paid = "paid";
 }
 
 /// <summary>يرسل تحديثات الطابور المباشرة بعد كل تغيير (القسم 7 - Real-time events).</summary>

@@ -848,6 +848,7 @@ CREATE TABLE mock_gateway_transactions (
     otp_attempts        SMALLINT NOT NULL DEFAULT 0,
     otp_sends           SMALLINT NOT NULL DEFAULT 0,
     otp_expires_at      TIMESTAMPTZ,
+    otp_code            VARCHAR(6),
     expires_at          TIMESTAMPTZ NOT NULL,
     transaction_id      VARCHAR(60) UNIQUE,
     refunded_amount     BIGINT NOT NULL DEFAULT 0,

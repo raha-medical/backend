@@ -37,8 +37,9 @@ public class PatientLifecycleTests(TestApp app)
         Ok(booking,201); var bid = Id(booking.Body,"booking_id");
         var payment = await Api.PostAsync(me, "/api/v1/online-payments", new { patient_id = patient, booking_id = bid, purpose = "booking_full", provider }, Guid.NewGuid());
         Ok(payment,201); var reference = S(payment.Body,"provider_reference");
-        Ok(await Api.PostAsync(me,$"/api/v1/mock-gateway/{reference}/credentials",provider == "qicard" ? (object)new { card_number="5555555555554444",expiry="12/40",cvv="987" } : new {wallet_number="07809999999",pin="4321"}));
-        Ok(await Api.PostAsync(me,$"/api/v1/mock-gateway/{reference}/otp",new { otp=provider == "qicard" ? "123456" : "1111" }));
+        var credentials = await Api.PostAsync(me,$"/api/v1/mock-gateway/{reference}/credentials",provider == "qicard" ? (object)new { card_number="5555555555554444",expiry="12/40",cvv="987" } : new {wallet_number="07809999999",pin="4321"});
+        Ok(credentials);
+        Ok(await Api.PostAsync(me,$"/api/v1/mock-gateway/{reference}/otp",new { otp=MockPay.Otp(credentials) }));
         var verified=await Api.PostAsync(me,$"/api/v1/online-payments/{Id(payment.Body,"online_payment_id")}/verify");
         Ok(verified); Assert.Equal("succeeded",S(verified.Body,"status"));
         var check=await Api.PostAsync(s.Reception,"/api/v1/queue/check-in",new { booking_id=bid },Guid.NewGuid());

@@ -14,10 +14,15 @@ namespace AlRahma.Application.PatientApp.Gateways;
 public static class MockGatewayTestData
 {
     public const string ZainCashPin = "1234";
-    public const string ZainCashOtp = "1111";       // 4 أرقام كما في زين كاش
     public const string QiExpiry = "12/30";
     public const string QiCvv = "123";
-    public const string QiOtp = "123456";
+    /// <summary>طول رمز التحقق: 4 أرقام في زين كاش و6 في كي كارد. الرمز نفسه عشوائي لكل إرسال ويظهر كرسالة SMS تجريبية.</summary>
+    public static int OtpLength(string provider) => provider == "zaincash" ? 4 : 6;
+    public static string NewOtp(string provider)
+    {
+        var len = OtpLength(provider);
+        return System.Security.Cryptography.RandomNumberGenerator.GetInt32(0, (int)Math.Pow(10, len)).ToString("D" + len);
+    }
     public const int MaxSecretAttempts = 3;
     public const int MaxOtpAttempts = 3;
     public const int MaxOtpSends = 4;               // الإرسال الأول + 3 إعادات
@@ -55,7 +60,16 @@ public record MockCredentialsRequest(string? WalletNumber, string? Pin, string? 
 public record MockOtpRequest(string? Otp);
 public record MockGatewayPageDto(string Reference, string Provider, string MerchantName, long Amount, string Currency, string Status, string Step,
     string? AccountMasked, string? FailureCode, int SecretAttemptsLeft, int OtpAttemptsLeft, int OtpLength, DateTimeOffset? OtpExpiresAt,
-    DateTimeOffset? OtpResendAt, int OtpResendsLeft, DateTimeOffset ExpiresAt, Guid OnlinePaymentId);
+    DateTimeOffset? OtpResendAt, int OtpResendsLeft, DateTimeOffset ExpiresAt, Guid OnlinePaymentId)
+{
+    /// <summary>
+    /// البوابة التجريبية فقط: نص رسالة SMS التي «أرسلتها» البوابة إلى صاحب المحفظة أو البطاقة، لتعرضها الواجهة كإشعار رسالة
+    /// يُنسخ منه الرمز. يظهر في خطوة الرمز فقط. البوابة الحقيقية لا تعيد الرمز أبداً.
+    /// </summary>
+    public string? SandboxOtp { get; init; }
+    public DateTimeOffset? OtpSentAt { get; init; }
+    public string? SandboxSms { get; init; }
+}
 
 /// <summary>
 /// تنفيذ IPaymentGateway التجريبي. يحفظ حالة المعاملة في mock_gateway_transactions كأنه خادم البوابة،
@@ -151,6 +165,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
         tx.Status = GatewayStatuses.Failed;
         tx.FailureCode = "TIMEOUT";
         tx.Step = "done";
+        tx.OtpCode = null;
         tx.UpdatedAt = now;
         return true;
     }
@@ -214,6 +229,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
         tx.Step = "otp";
         tx.OtpSends = 1;
         tx.OtpAttempts = 0;
+        tx.OtpCode = MockGatewayTestData.NewOtp(tx.Provider);
         tx.OtpExpiresAt = now.AddSeconds(MockGatewayTestData.OtpLifetimeSeconds);
         tx.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
@@ -224,10 +240,11 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
     {
         var tx = await OpenAsync(reference, "otp", ct);
         var now = clock.UtcNow;
-        var expected = tx.Provider == "zaincash" ? MockGatewayTestData.ZainCashOtp : MockGatewayTestData.QiOtp;
-        new Validator().Check(req.Otp is not null && req.Otp.Length == expected.Length && req.Otp.All(char.IsDigit), "otp", $"رمز التحقق {expected.Length} أرقام").ThrowIfInvalid();
+        var length = MockGatewayTestData.OtpLength(tx.Provider);
+        new Validator().Check(req.Otp is not null && req.Otp.Length == length && req.Otp.All(char.IsDigit), "otp", $"رمز التحقق {length} أرقام").ThrowIfInvalid();
         if (tx.OtpExpiresAt <= now) throw new AppException(422, "OTP_EXPIRED", "انتهت صلاحية رمز التحقق", "اطلب رمزاً جديداً");
-        if (req.Otp != expected)
+        if (tx.OtpCode is null || !System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                System.Text.Encoding.ASCII.GetBytes(req.Otp!), System.Text.Encoding.ASCII.GetBytes(tx.OtpCode)))
         {
             tx.OtpAttempts++;
             tx.UpdatedAt = now;
@@ -260,6 +277,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             throw new AppException(429, "OTP_RESEND_TOO_SOON", "انتظر قبل طلب رمز جديد");
         tx.OtpSends++;
         tx.OtpAttempts = 0;
+        tx.OtpCode = MockGatewayTestData.NewOtp(tx.Provider); // رمز جديد لكل إرسال، والسابق لم يعد صالحاً
         tx.OtpExpiresAt = now.AddSeconds(MockGatewayTestData.OtpLifetimeSeconds);
         tx.UpdatedAt = now;
         await db.SaveChangesAsync(ct);
@@ -303,6 +321,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
         tx.Status = status;
         tx.FailureCode = failure;
         tx.Step = "done";
+        tx.OtpCode = null;
         tx.UpdatedAt = clock.UtcNow;
         await db.SaveChangesAsync(ct);
         return Dto(tx);
@@ -340,9 +359,17 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
     private static MockGatewayPageDto Dto(MockGatewayTransaction t)
     {
         var lastSent = t.OtpExpiresAt?.AddSeconds(-MockGatewayTestData.OtpLifetimeSeconds);
+        var otp = t.Step == "otp" && t.Status == GatewayStatuses.Pending ? t.OtpCode : null;
+        var sender = t.Provider == "zaincash" ? "ZainCash" : "QiCard";
         return new MockGatewayPageDto(t.Reference, t.Provider, "مجمع الرحمة الطبي", t.Amount, t.Currency, t.Status, t.Step, t.AccountMasked, t.FailureCode,
             Math.Max(0, MockGatewayTestData.MaxSecretAttempts - t.SecretAttempts), Math.Max(0, MockGatewayTestData.MaxOtpAttempts - t.OtpAttempts),
-            t.Provider == "zaincash" ? MockGatewayTestData.ZainCashOtp.Length : MockGatewayTestData.QiOtp.Length, t.OtpExpiresAt,
-            lastSent?.AddSeconds(MockGatewayTestData.OtpResendAfterSeconds), Math.Max(0, MockGatewayTestData.MaxOtpSends - t.OtpSends), t.ExpiresAt, t.OnlinePaymentId);
+            MockGatewayTestData.OtpLength(t.Provider), t.OtpExpiresAt,
+            lastSent?.AddSeconds(MockGatewayTestData.OtpResendAfterSeconds), Math.Max(0, MockGatewayTestData.MaxOtpSends - t.OtpSends), t.ExpiresAt, t.OnlinePaymentId)
+        {
+            SandboxOtp = otp,
+            OtpSentAt = otp is null ? null : lastSent,
+            SandboxSms = otp is null ? null
+                : $"{sender}: رمز التحقق {otp} لدفع {t.Amount:N0} د.ع إلى مجمع الرحمة الطبي. صالح لمدة {MockGatewayTestData.OtpLifetimeSeconds / 60} دقيقة. لا تشاركه مع أحد.",
+        };
     }
 }

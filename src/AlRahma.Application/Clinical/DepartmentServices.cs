@@ -8,7 +8,7 @@ using Microsoft.EntityFrameworkCore;
 
 namespace AlRahma.Application.Clinical;
 
-public record WorklistQuery(string? Status, DateOnly? Date, string? Q, string? Modality, int Page = 1, int PageSize = 20);
+public record WorklistQuery(string? Status, DateOnly? Date, string? Q, string? Modality, int Page = 1, int PageSize = 20, string? Source = null);
 public record WorklistItemDto(Guid OrderItemId, Guid PatientId, string PatientName, string FileNumber, string? Gender, int? Age, Guid ServiceId,
     string ServiceName, string? OrderedBy, string? ReferringDoctorName, string Status, string PaymentStatus, string? SampleBarcode, bool HasCritical,
     DateTimeOffset OrderedAt, string? Note, string? Modality, DateTimeOffset? ScheduledAt, string? Room, DateTimeOffset? PerformedAt)
@@ -19,6 +19,8 @@ public record WorklistItemDto(Guid OrderItemId, Guid PatientId, string PatientNa
     public Guid? ReferralId { get; init; }
     /// <summary>حاضر لكن غير مدفوع: يظهر للفني بلا إجراء حتى يُدفع أو يُستثنى.</summary>
     public bool AwaitingPayment { get; init; }
+    public string Source { get; init; } = "doctor";
+    public string? PhoneNumber { get; init; }
 }
 public record CollectSampleRequest(string? SampleBarcode);
 public record CollectSampleResponse(Guid OrderItemId, string Status, string SampleBarcode)
@@ -110,6 +112,7 @@ public class DepartmentCore(IAppDbContext db, ICurrentUser current, IClock clock
         var open = department == OrderDepartments.Lab ? OpenLab : OpenRadiology;
         var allowed = open.Append(OrderStatuses.Released).Append(OrderStatuses.Ordered).ToArray();
         new Validator()
+            .Check(q.Source is null or "doctor" or "direct", "source", "doctor | direct")
             .Check(q.Status is null || allowed.Contains(q.Status), "status", string.Join(" | ", allowed))
             .Check(q.Modality is null || Modalities.All.Contains(q.Modality), "modality", string.Join(" | ", Modalities.All))
             .ThrowIfInvalid();
@@ -138,6 +141,8 @@ public class DepartmentCore(IAppDbContext db, ICurrentUser current, IClock clock
         // حاضر غير مدفوع يظهر بلا إجراء (العقد 23.3): الفني يعرف أنه وصل ويوجهه للدفع
         query = q.Status is { } st ? query.Where(x => x.o.Status == st) : query.Where(x => open.Contains(x.o.Status) || x.o.Status == OrderStatuses.Ordered);
         if (q.Modality is { } m) query = query.Where(x => x.Modality == m);
+        if (q.Source == "doctor") query = query.Where(x => x.o.OrderedByDoctorId != null);
+        if (q.Source == "direct") query = query.Where(x => x.o.OrderedByDoctorId == null);
         if (!string.IsNullOrWhiteSpace(q.Q))
         {
             var term = q.Q.Trim();
@@ -154,6 +159,7 @@ public class DepartmentCore(IAppDbContext db, ICurrentUser current, IClock clock
         {
             ActivationMethod = x.Referral?.ActivationMethod, ActivatedAt = x.Referral?.ActivatedAt, ReferralId = x.Referral?.ReferralId,
             AwaitingPayment = x.o.Status == OrderStatuses.Ordered,
+            Source = x.o.OrderedByDoctorId is null ? "direct" : "doctor", PhoneNumber = x.p.PhoneNumber,
         }).ToList(), page.SafePage, page.SafePageSize, total);
     }
 

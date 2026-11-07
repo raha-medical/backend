@@ -327,17 +327,19 @@ public class Part2Tests(TestApp app)
         Assert.Equal(201, (await Api.PostAsync(s.Reception, "/api/v1/shifts/open", new { opening_float = 0, device_code = deviceCode }, Guid.NewGuid())).Status);
         var patient = Guid.NewGuid();
         var ticket = Guid.NewGuid();
-        var at = DateTimeOffset.UtcNow.AddMinutes(-20);
+        // This scenario verifies today's snapshot. A 20-minute backdate moves
+        // the ticket into yesterday when the suite runs just after midnight.
+        var at = DateTimeOffset.UtcNow;
         var ops = new object[]
         {
             new { op_id = Guid.NewGuid(), type = "patient.create", occurred_at = at, payload = new { patient_id = patient, full_name = "مريض أوفلاين", phone_number = Phone() } },
-            new { op_id = Guid.NewGuid(), type = "queue.check_in", occurred_at = at.AddMinutes(1), payload = new { ticket_id = ticket, patient_id = patient, doctor_id = s.DoctorId } },
+            new { op_id = Guid.NewGuid(), type = "queue.check_in", occurred_at = at, payload = new { ticket_id = ticket, patient_id = patient, doctor_id = s.DoctorId } },
             new
             {
-                op_id = Guid.NewGuid(), type = "payment.create", occurred_at = at.AddMinutes(2),
+                op_id = Guid.NewGuid(), type = "payment.create", occurred_at = at,
                 payload = new { patient_id = patient, ticket_id = ticket, tenders = new[] { new { method = "cash", amount = 25000 } }, offline_receipt_number = prefix + "7" },
             },
-            new { op_id = Guid.NewGuid(), type = "agent_event", occurred_at = at.AddMinutes(3), payload = new { local_event_id = 991, type = "drawer.opened_without_receipt", occurred_at = at.AddMinutes(3) } },
+            new { op_id = Guid.NewGuid(), type = "agent_event", occurred_at = at, payload = new { local_event_id = 991, type = "drawer.opened_without_receipt", occurred_at = at } },
         };
         var batch = await Api.PostAsync(s.Reception, "/api/v1/sync/batch", new { device_id = deviceCode, operations = ops });
         Assert.True(batch.Status == 200, batch.Raw);

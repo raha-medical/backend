@@ -5,6 +5,7 @@ using AlRahma.Application.Clinical;
 using AlRahma.Application.Common;
 using AlRahma.Application.Notifications;
 using AlRahma.Application.Patients;
+using AlRahma.Application.Queue;
 using AlRahma.Domain.Common;
 using AlRahma.Domain.Entities;
 using AlRahma.Application.PatientApp.Gateways;
@@ -26,7 +27,7 @@ public record OnlinePaymentDto(Guid OnlinePaymentId, string Purpose, Guid Patien
 /// </summary>
 public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, NumberSequences numbers,
     SettingsReader settings, FinanceCore finance, BanService bans, MedicalOrderSync orders, PatientPortalService portal, IRealtime realtime,
-    IOptions<OnlinePaymentOptions> options, NotificationService notifications, PaymentGatewayRegistry gateways)
+    IOptions<OnlinePaymentOptions> options, NotificationService notifications, PaymentGatewayRegistry gateways, QueueNotifier notifier)
 {
     private OnlinePaymentOptions Options => options.Value;
 
@@ -97,7 +98,7 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             && o.BookingId == bookingId && o.InvoiceId == invoiceId && o.InvoiceItemId == invoiceItemId && o.Status == OnlinePaymentStatuses.Pending, ct);
         if (pending is not null)
             throw new AppException(409, "PAYMENT_PENDING", "توجد عملية دفع معلقة لنفس الغرض", "أكملها أو انتظر انتهاءها")
-                { Extensions = new Dictionary<string, object?> { ["online_payment_id"] = pending.OnlinePaymentId } };
+                { Extensions = new Dictionary<string, object?> { ["online_payment_id"] = pending.OnlinePaymentId, ["provider_reference"] = pending.ProviderReference, ["provider"] = pending.Provider, ["amount"] = pending.Amount } };
 
         var op = new OnlinePayment
         {
@@ -232,6 +233,7 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
         if (op.Status == OnlinePaymentStatuses.Succeeded && op.Purpose == OnlinePaymentPurposes.Invoice)
             await orders.SyncAsync(await db.Payments.Where(p => p.OnlinePaymentId == op.OnlinePaymentId)
                 .Join(db.PaymentAllocations, p => p.PaymentId, a => a.PaymentId, (p, a) => a.InvoiceItemId).ToArrayAsync(ct), ct);
+        if (op.Status == OnlinePaymentStatuses.Succeeded) await NotifyReceptionAsync(op, ct);
         if (op.PatientAccountId is { } account)
         {
             await realtime.SendAsync(RealtimeGroups.PatientAccount(account), NotificationTypes.OnlinePaymentUpdated, await ToDtoAsync(op, ct));
@@ -244,6 +246,44 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
                 "دفع إلكتروني وصل بعد انتهاء المهلة", $"{op.Amount:N0} د.ع سُجّلت للمريض (على الحجز إن بقي صالحاً، وإلا رصيداً)", "online_payment", op.OnlinePaymentId, ct);
         }
         return op;
+    }
+
+    /// <summary>
+    /// الاستقبال يرى الدفع فوراً: حالة الحجز (booking.changed بـ action = paid) وطابور الوجبة (queue.updated) وتنبيه
+    /// online_payment.received لمجموعة طابور الفرع (اسم المراجع، المبلغ، كامل أو عربون، رقم التذكرة).
+    /// </summary>
+    private async Task NotifyReceptionAsync(OnlinePayment op, CancellationToken ct)
+    {
+        var payment = await db.Payments.AsNoTracking().Where(p => p.OnlinePaymentId == op.OnlinePaymentId).Select(p => new { p.BranchId, p.PaymentId }).FirstOrDefaultAsync(ct);
+        if (payment is null) return;
+        var sessions = new HashSet<Guid>();
+        string? ticketNumber = null;
+        if (op.BookingId is { } bookingId)
+        {
+            var b = await db.Bookings.AsNoTracking().Where(x => x.BookingId == bookingId).Select(x => new { x.SessionId }).FirstOrDefaultAsync(ct);
+            if (b is not null) sessions.Add(b.SessionId);
+            ticketNumber = await db.QueueTickets.AsNoTracking().Where(t => t.BookingId == bookingId).Select(t => t.TicketNumber).FirstOrDefaultAsync(ct);
+            await notifier.BookingChangedAsync(bookingId, BookingChangeActions.Paid, null, ct);
+        }
+        else
+        {
+            // دفع فاتورة من التطبيق بعد الحضور: كل تذكرة لها بند في هذه الدفعة
+            var tickets = await db.PaymentAllocations.AsNoTracking().Where(a => a.PaymentId == payment.PaymentId)
+                .Join(db.InvoiceItems.AsNoTracking(), a => a.InvoiceItemId, i => i.InvoiceItemId, (a, i) => i.TicketId)
+                .Where(t => t != null).Distinct()
+                .Join(db.QueueTickets.AsNoTracking(), t => t!.Value, q => q.TicketId, (t, q) => new { q.SessionId, q.TicketNumber })
+                .ToListAsync(ct);
+            foreach (var t in tickets) sessions.Add(t.SessionId);
+            ticketNumber = tickets.Select(t => t.TicketNumber).FirstOrDefault();
+        }
+        foreach (var s in sessions) await notifier.SessionChangedAsync(s, ct);
+        var patientName = await db.Patients.AsNoTracking().Where(p => p.PatientId == op.PatientId).Select(p => p.FullName).FirstAsync(ct);
+        await realtime.SendAsync(RealtimeGroups.BranchQueue(payment.BranchId), "online_payment.received", new
+        {
+            online_payment_id = op.OnlinePaymentId, purpose = op.Purpose, amount = op.Amount, provider = op.Provider,
+            patient_id = op.PatientId, patient_name = patientName, booking_id = op.BookingId, invoice_id = op.InvoiceId,
+            ticket_number = ticketNumber, occurred_at = clock.UtcNow,
+        });
     }
 
     /// <summary>

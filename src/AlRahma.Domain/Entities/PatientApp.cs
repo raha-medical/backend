@@ -140,6 +140,8 @@ public class MockGatewayTransaction
     public short OtpAttempts { get; set; }
     public short OtpSends { get; set; }
     public DateTimeOffset? OtpExpiresAt { get; set; }
+    /// <summary>رمز التحقق المرسل بالـ SMS التجريبية (عشوائي لكل إرسال). يُمسح عند انتهاء المعاملة.</summary>
+    public string? OtpCode { get; set; }
     public DateTimeOffset ExpiresAt { get; set; }
     public string? TransactionId { get; set; }
     public long RefundedAmount { get; set; }

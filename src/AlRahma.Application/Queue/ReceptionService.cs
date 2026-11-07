@@ -42,10 +42,11 @@ public class ReceptionService(IAppDbContext db, ICurrentUser current, IClock clo
         // الفرع الحالي فقط، والموظف بنطاقه: الطبيب طابوره، وموظف الاستقبال عياداته
         var doctors = db.Doctors.AsNoTracking().Where(d => d.Clinic!.BranchId == current.BranchId);
         if (current.Role == Roles.Doctor) doctors = doctors.Where(d => d.UserId == current.UserId);
-        else if (current.Role == Roles.Receptionist)
+        else if (current.Role != Roles.Admin && current.Role != Roles.BranchManager)
         {
-            var mine = db.UserClinics.Where(c => c.UserId == current.UserId).Select(c => c.ClinicId);
-            doctors = doctors.Where(d => mine.Contains(d.ClinicId));
+            // موظف الاستقبال، والدور المخصص الذي له عيادات مسندة: عياداته فقط
+            var mine = await db.UserClinics.Where(c => c.UserId == current.UserId).Select(c => c.ClinicId).ToListAsync(ct);
+            if (current.Role == Roles.Receptionist || mine.Count > 0) doctors = doctors.Where(d => mine.Contains(d.ClinicId));
         }
         if (q.DoctorId is { } did) doctors = doctors.Where(d => d.DoctorId == did);
         if (q.ClinicId is { } cid) doctors = doctors.Where(d => d.ClinicId == cid);

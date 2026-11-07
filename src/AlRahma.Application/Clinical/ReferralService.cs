@@ -10,7 +10,11 @@ namespace AlRahma.Application.Clinical;
 
 public record ReferralDto(Guid ReferralId, string Service, string ServiceAr, string Status, string StatusAr, Guid PatientId, string PatientName, string FileNumber,
     string Title, string? DoctorName, Guid? OrderItemId, Guid? PrescriptionId, string? PrescriptionCode, string PaymentStatus, long AmountDue,
-    string? ActivationMethod, string? ActivationMethodAr, DateTimeOffset? ActivatedAt, DateTimeOffset? CompletedAt, DateTimeOffset ExpiresAt, DateTimeOffset CreatedAt);
+    string? ActivationMethod, string? ActivationMethodAr, DateTimeOffset? ActivatedAt, DateTimeOffset? CompletedAt, DateTimeOffset ExpiresAt, DateTimeOffset CreatedAt)
+{
+    public string Source { get; init; } = "doctor";
+    public string? PhoneNumber { get; init; }
+}
 public record ReferralSummaryDto(int Referred, int Activated, int CompletedToday);
 public record ScanReferralRequest(string? Service, string? Code);
 public record ScanReferralResponse(int Activated, IReadOnlyList<ReferralDto> Items);
@@ -193,12 +197,15 @@ public class ReferralService(IAppDbContext db, ICurrentUser current, IClock cloc
 
     private IQueryable<Referral> Scoped(string service) => db.Referrals.Where(r => r.BranchId == current.BranchId && r.Service == service);
 
-    public async Task<PagedResult<ReferralDto>> ListAsync(string? service, string? status, DateOnly? date, string? search, int page, int pageSize, CancellationToken ct)
+    public async Task<PagedResult<ReferralDto>> ListAsync(string? service, string? status, DateOnly? date, string? search, int page, int pageSize, CancellationToken ct, string? source = null)
     {
         EnsureCanRead(service);
+        new Validator().Check(source is null or "doctor" or "direct", "source", "doctor | direct").ThrowIfInvalid();
         new Validator().Check(status is null || StatusList.Contains(status), "status", string.Join(" | ", StatusList)).ThrowIfInvalid();
         var p = new PageQuery(page, pageSize);
         var q = Scoped(service!).AsNoTracking();
+        if (source == "direct") q = q.Where(r => r.OrderItemId != null && db.MedicalOrders.Any(o => o.OrderItemId == r.OrderItemId && o.OrderedByDoctorId == null));
+        if (source == "doctor") q = q.Where(r => r.PrescriptionId != null || db.MedicalOrders.Any(o => o.OrderItemId == r.OrderItemId && o.OrderedByDoctorId != null));
         if (status is not null) q = q.Where(r => r.Status == status);
         if (date is { } d)
         {
@@ -369,7 +376,7 @@ public class ReferralService(IAppDbContext db, ICurrentUser current, IClock cloc
             join d in db.Doctors.AsNoTracking() on o.OrderedByDoctorId equals d.DoctorId into dj
             from d in dj.DefaultIfEmpty()
             where orderIds.Contains(o.OrderItemId)
-            select new { o.OrderItemId, i.ServiceName, ItemStatus = i.Status, i.NetPrice, Doctor = d == null ? o.ReferringDoctorName : d.FullName })
+            select new { o.OrderItemId, o.OrderedByDoctorId, i.ServiceName, ItemStatus = i.Status, i.NetPrice, Doctor = d == null ? o.ReferringDoctorName : d.FullName })
             .ToDictionaryAsync(x => x.OrderItemId, ct);
         var rxIds = rows.Where(r => r.PrescriptionId != null).Select(r => r.PrescriptionId!.Value).ToList();
         var rxs = await (
@@ -386,7 +393,10 @@ public class ReferralService(IAppDbContext db, ICurrentUser current, IClock cloc
             return new ReferralDto(r.ReferralId, r.Service, ServiceAr(r.Service), r.Status, StatusAr(r.Status), p.PatientId, p.FullName, p.FileNumber,
                 o?.ServiceName ?? (rx is null ? "" : $"وصفة ({rx.Lines} أدوية)"), o?.Doctor ?? rx?.Doctor, r.OrderItemId, r.PrescriptionId, rx?.PrescriptionCode,
                 o is null ? "not_applicable" : ConsultationService.PaymentStatusOf(o.ItemStatus), unpaid ? o!.NetPrice : 0,
-                r.ActivationMethod, MethodAr(r.ActivationMethod), r.ActivatedAt, r.CompletedAt, r.ExpiresAt, r.CreatedAt);
+                r.ActivationMethod, MethodAr(r.ActivationMethod), r.ActivatedAt, r.CompletedAt, r.ExpiresAt, r.CreatedAt)
+            {
+                Source = o is not null && o.OrderedByDoctorId is null ? "direct" : "doctor", PhoneNumber = p.PhoneNumber,
+            };
         }).ToList();
     }
 }

@@ -11,9 +11,44 @@ public record CreateMyPatientRequest(Guid? PatientId, string? FullName, string? 
 public record UpdateMyPatientRequest(string? Relation);
 
 /// <summary>ملفات المرضى المربوطة بحساب تطبيق المريض (هو وأفراد عائلته).</summary>
+public record WalletEntryDto(Guid EntryId, long Amount, string Kind, string KindAr, DateTimeOffset CreatedAt);
+public record WalletPatientDto(Guid PatientId, string FullName, long Balance, IReadOnlyList<WalletEntryDto> Entries);
+public record WalletDto(long TotalBalance, IReadOnlyList<WalletPatientDto> Patients);
+
 public class PatientPortalService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, NumberSequences numbers)
 {
     public Guid AccountId => current.PatientAccountId ?? throw new AppException(401, "UNAUTHORIZED", "يلزم تسجيل الدخول");
+
+    private static string WalletKindAr(string kind) => kind switch
+    {
+        "booking_cancel_credit" => "استرجاع حجز ملغى",
+        "booking_deposit" => "عربون حجز",
+        "booking_rebook" => "إعادة حجز",
+        "left_before_entry" => "غياب بعد الدفع",
+        "refund_credit" => "استرجاع إلى الرصيد",
+        "refunded_out" => "استرجاع إلى وسيلة الدفع",
+        "applied_to_payment" => "استُخدم في دفعة",
+        _ => "حركة رصيد",
+    };
+
+    /// <summary>رصيد ملفات الحساب ومصدر كل حركة (UI-40). آخر 100 حركة لكل ملف.</summary>
+    public async Task<WalletDto> WalletAsync(CancellationToken ct)
+    {
+        var patients = await (from l in db.PatientAccountLinks.AsNoTracking()
+                              join p in db.Patients.AsNoTracking() on l.PatientId equals p.PatientId
+                              where l.PatientAccountId == AccountId && p.MergedIntoPatientId == null
+                              select new { p.PatientId, p.FullName }).ToListAsync(ct);
+        var ids = patients.Select(p => p.PatientId).ToList();
+        var entries = await db.PatientCredits.AsNoTracking().Where(c => ids.Contains(c.PatientId))
+            .OrderByDescending(c => c.CreatedAt).ToListAsync(ct);
+        var result = patients.Select(p =>
+        {
+            var mine = entries.Where(e => e.PatientId == p.PatientId).ToList();
+            return new WalletPatientDto(p.PatientId, p.FullName, mine.Sum(e => e.Amount),
+                mine.Take(100).Select(e => new WalletEntryDto(e.EntryId, e.Amount, e.Kind, WalletKindAr(e.Kind), e.CreatedAt)).ToList());
+        }).ToList();
+        return new WalletDto(result.Sum(p => p.Balance), result);
+    }
 
     /// <summary>يتحقق أن المريض مربوط بحساب المريض الحالي، وإلا 404 PATIENT_NOT_FOUND.</summary>
     public async Task EnsureLinkedAsync(Guid patientId, CancellationToken ct)

@@ -157,4 +157,11 @@ VALUES
  ('00000000-0000-7000-8000-0000000b0008', '00000000-0000-7000-8000-0000000e0006', '00000000-0000-7000-8000-000050003002', 1, 'new_visit', 30000, 'phone', 'booked', 'unpaid', NULL, NULL, NULL, NULL, FALSE);
 UPDATE patients SET no_show_count = 1 WHERE patient_id = '00000000-0000-7000-8000-0000000e0004';
 
+-- كل حجز فعّال له تذكرة بانتظار الوصول، كما يفعل BookingService، وإلا فشل تثبيت الحضور ولم يظهر الحجز في الطابور
+INSERT INTO queue_tickets (ticket_id, branch_id, session_id, doctor_id, patient_id, booking_id, ticket_number, sequence_number, source, status)
+SELECT gen_random_uuid(), s.branch_id, b.session_id, s.doctor_id, b.patient_id, b.booking_id, 'A-' || (100 + b.sequence_number), b.sequence_number, b.source, 'waiting'
+FROM bookings b JOIN doctor_sessions s ON s.session_id = b.session_id
+WHERE b.status = 'booked'
+ON CONFLICT (booking_id) DO NOTHING;
+
 COMMIT;

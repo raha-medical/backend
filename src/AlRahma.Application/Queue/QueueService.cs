@@ -97,10 +97,11 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
             .Where(d => d.IsActive && d.Clinic!.BranchId == current.BranchId);
         if (clinicId is { } cid) query = query.Where(d => d.ClinicId == cid);
         if (current.Role == Roles.Doctor) query = query.Where(d => d.UserId == current.UserId);
-        else if (current.Role == Roles.Receptionist)
+        else if (current.Role != Roles.Admin && current.Role != Roles.BranchManager)
         {
+            // موظف الاستقبال والأدوار المخصصة يرون عياداتهم فقط، فاستقبال المختبر لا يرى طوابير الأطباء
             var mine = await MyClinicsAsync(ct);
-            query = query.Where(d => mine.Contains(d.ClinicId));
+            if (current.Role == Roles.Receptionist || mine.Count > 0) query = query.Where(d => mine.Contains(d.ClinicId));
         }
         var list = await query.OrderBy(d => d.Clinic!.Name).ThenBy(d => d.FullName).ToListAsync(ct);
         var day = date ?? clock.BaghdadToday();
@@ -1131,7 +1132,10 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
     {
         if (current.Role == Roles.Doctor && doctor.UserId != current.UserId)
             throw AppException.Forbidden("الطبيب يدير طابوره فقط");
-        if (current.Role == Roles.Receptionist && !(await MyClinicsAsync(ct)).Contains(doctor.ClinicId))
+        if (current.Role is Roles.Admin or Roles.BranchManager or Roles.Doctor) return;
+        // موظف الاستقبال، والدور المخصص الذي له عيادات مسندة: عياداته فقط
+        var mine = await MyClinicsAsync(ct);
+        if ((current.Role == Roles.Receptionist || mine.Count > 0) && !mine.Contains(doctor.ClinicId))
             throw AppException.Forbidden("هذه العيادة ليست من عياداتك");
     }
 

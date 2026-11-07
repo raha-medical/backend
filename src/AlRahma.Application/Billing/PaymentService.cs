@@ -34,22 +34,27 @@ public class PaymentService(IAppDbContext db, ICurrentUser current, IAuditLogger
     IDrawerTokenIssuer drawer, QueueNotifier notifier,
     Clinical.MedicalOrderSync orders, Notifications.NotificationService notifications, SettingsReader settings, CurrencyService currency)
 {
+    /// <summary>البنود التي يمكن تحصيلها: المصدر الوحيد لسلة التحصيل ومبلغ المستحق في الطابور.</summary>
+    public static IQueryable<InvoiceItem> CollectableItems(IAppDbContext db) =>
+        from i in db.InvoiceItems.AsNoTracking()
+        where (i.Status == InvoiceItemStatuses.Unpaid || i.Status == InvoiceItemStatuses.Deferred)
+              && !DeferralService.WrittenOffItemIds(db).Contains(i.InvoiceItemId)
+              // تحويل مغلق (خارجي أو منتهي) لا يبقى ديناً في السلة، ويعود إذا فُعّل لاحقاً
+              && !(from m in db.MedicalOrders join r in db.Referrals on m.OrderItemId equals r.OrderItemId
+                   where m.InvoiceItemId == i.InvoiceItemId && (r.Status == ReferralStatuses.External || r.Status == ReferralStatuses.Expired) select m.OrderItemId).Any()
+        select i;
+
     public async Task<BillableItemsDto> BillableItemsAsync(Guid patientId, string? department, CancellationToken ct)
     {
         await LoadPatientAsync(patientId, ct);
         new Validator().Check(department is null or "clinic" or "lab" or "radiology" or "pharmacy", "department", "clinic | lab | radiology | pharmacy")
             .ThrowIfInvalid();
         var rows = await (
-            from i in db.InvoiceItems.AsNoTracking()
+            from i in CollectableItems(db)
             join inv in db.Invoices.AsNoTracking() on i.InvoiceId equals inv.InvoiceId
             join d in db.Doctors.AsNoTracking() on i.DoctorId equals d.DoctorId into dj
             from d in dj.DefaultIfEmpty()
             where inv.PatientId == patientId && inv.BranchId == current.BranchId && inv.Status != InvoiceStatuses.Void
-                  && (i.Status == InvoiceItemStatuses.Unpaid || i.Status == InvoiceItemStatuses.Deferred)
-                  && !DeferralService.WrittenOffItemIds(db).Contains(i.InvoiceItemId)
-                  // تحويل مغلق (خارجي أو منتهي) لا يبقى ديناً في السلة، ويعود إذا فُعّل لاحقاً
-                  && !(from m in db.MedicalOrders join r in db.Referrals on m.OrderItemId equals r.OrderItemId
-                       where m.InvoiceItemId == i.InvoiceItemId && (r.Status == ReferralStatuses.External || r.Status == ReferralStatuses.Expired) select m.OrderItemId).Any()
             orderby i.CreatedAt
             select new { i, inv.InvoiceNumber, Doctor = d == null ? null : d.FullName }).ToListAsync(ct);
         var items = rows.Select(r =>

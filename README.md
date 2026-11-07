@@ -213,3 +213,7 @@ psql "$DATABASE_URL" -f database/migrations/005_clinical_and_patient_app.sql
 ## النسخ الاحتياطي (مجاني)
 
 pgBackRest داخل حاوية قاعدة البيانات (`deploy/backup`): كاملة كل جمعة وتزايدية يومياً الساعة 3 فجراً بتوقيت بغداد، WAL كل 5 دقائق، واختبار استرجاع أسبوعي. لوحة المدير: `/api/v1/admin/backups`. دليل الاسترجاع: [docs/backup_restore.md](docs/backup_restore.md).
+
+## نشر Railway
+
+راجع [دليل API وقاعدة البيانات والتخزين](docs/deployment-railway.md) وقالب المتغيرات في deploy/railway.env.example. لا تُشغّل schema_v5.sql على قاعدة قائمة.

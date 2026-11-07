@@ -12,7 +12,8 @@ public record OpenShiftRequest(Guid? ShiftId, long? OpeningFloat, Guid? DeviceId
 /// <summary>clinic_id/clinic_name/department: نقطة التحصيل (عيادة، مختبر، أشعة، صيدلية)، أو null لدرج عام.</summary>
 /// <summary>summary: ما يراه صاحب الحساب اليومي (قرار المالك). auto_closed: أُغلق تلقائياً وينتظر إقراره بالمبلغ المعدود.</summary>
 public record ShiftDto(Guid ShiftId, string Status, DateTimeOffset OpenedAt, DateTimeOffset? ClosedAt, long OpeningFloat, Guid? DeviceId, int ReceiptsCount,
-    Guid? ClinicId = null, string? ClinicName = null, string? Department = null, ShiftSummaryDto? Summary = null, bool AutoClosed = false);
+    Guid? ClinicId = null, string? ClinicName = null, string? Department = null, ShiftSummaryDto? Summary = null, bool AutoClosed = false,
+    long? VarianceCash = null, long? VariancePos = null, long? VarianceUsd = null);
 public record UnprintedReceiptDto(Guid ReceiptId, string ReceiptNumber, string Type, long Total, DateTimeOffset IssuedAt, string? Reason);
 /// <summary>
 /// الحساب اليومي كما يراه صاحبه أثناء اليوم وعند الإغلاق:
@@ -514,7 +515,9 @@ public class ShiftService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         var point = s.ClinicId is { } cid ? await db.Clinics.AsNoTracking().FirstOrDefaultAsync(c => c.ClinicId == cid, ct) : null;
         // الملخص لصاحب الحساب فقط (ولا يرى حسابات غيره)
         var summary = s.UserId == current.UserId ? await SummaryAsync(s, ct) : null;
+        // الفرق يراه صاحب الحساب بعد الإغلاق فقط (UI-54)، وقبل إعلان المبلغ لا فرق أصلاً
+        var mine = s.UserId == current.UserId && s.Status != ShiftStatuses.Open && s.DeclaredCash is not null;
         return new ShiftDto(s.ShiftId, s.Status, s.OpenedAt, s.ClosedAt, s.OpeningFloat, s.DeviceId, receipts, s.ClinicId, point?.Name, point?.Department,
-            summary, s.AutoClosed);
+            summary, s.AutoClosed, mine ? s.VarianceCash : null, mine ? s.VariancePos : null, mine ? s.VarianceUsd : null);
     }
 }

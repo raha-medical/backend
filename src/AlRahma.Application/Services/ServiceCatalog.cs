@@ -26,11 +26,33 @@ public record UpdateServiceRequest(string? Name, Guid? ClinicId, long? Price, bo
     string? Currency = null, bool? RequiresPrescription = null);
 
 public record ServiceListQuery(string? Type, Guid? ClinicId, string? Q, bool IncludeInactive);
+public record LabServiceRequest(string? Name, long? Price, string? Currency = null, string? Reason = null);
+public record PharmacyDrugRequest(string? Name, long? Price, string? Currency = null, bool? RequiresPrescription = null, string? Reason = null);
 
 /// <summary>الخدمات والأسعار لكل فرع (الفرع من التوكن). الأسعار تُقرأ من هنا فقط، ولا تُرسل من الواجهة أبداً.</summary>
 public class ServiceCatalog(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock)
 {
     public const long MaxPrice = 100_000_000; // 100 مليون دينار حد معقول لأي خدمة
+
+    public Task<ServiceDto> CreateDrugAsync(PharmacyDrugRequest req, CancellationToken ct) =>
+        CreateAsync(new CreateServiceRequest(req.Name, ServiceTypes.Pharmacy, null, null, null, req.Price, false, req.Currency, req.RequiresPrescription), ct);
+
+    public async Task<ServiceDto> UpdateDrugAsync(Guid id, PharmacyDrugRequest req, CancellationToken ct)
+    {
+        var service = await LoadAsync(id, ct);
+        if (service.Type != ServiceTypes.Pharmacy) throw AppException.Forbidden("يمكن تعديل علاجات الصيدلية فقط");
+        return await UpdateAsync(id, new UpdateServiceRequest(req.Name, null, req.Price, null, null, req.Reason, req.Currency, req.RequiresPrescription), ct);
+    }
+
+    public Task<ServiceDto> CreateLabAsync(LabServiceRequest req, CancellationToken ct) =>
+        CreateAsync(new CreateServiceRequest(req.Name, ServiceTypes.Lab, null, null, null, req.Price, false, req.Currency), ct);
+
+    public async Task<ServiceDto> UpdateLabAsync(Guid id, LabServiceRequest req, CancellationToken ct)
+    {
+        var service = await LoadAsync(id, ct);
+        if (service.Type != ServiceTypes.Lab) throw AppException.Forbidden("يمكن تعديل تحاليل المختبر فقط من هذه الشاشة");
+        return await UpdateAsync(id, new UpdateServiceRequest(req.Name, null, req.Price, null, null, req.Reason, req.Currency), ct);
+    }
 
     public async Task<IReadOnlyList<ServiceDto>> ListAsync(ServiceListQuery q, CancellationToken ct)
     {

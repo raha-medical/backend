@@ -1,7 +1,20 @@
 # عقود الـ API - v6
 
-**الإصدار:** v6 · **آخر commit:** `6010c12` (backend، الفرع staging) · **التاريخ:** 2026-11-07 · **عدد النقاط:** 246 (كل `[Http*]` في `src/AlRahma.Api/Controllers`، وكلها موثقة هنا)
+**الإصدار:** v6 (الوسم `v1.3-handoff`) · **آخر commit للكود:** `ec3b223` (backend، الفرع staging) · **التاريخ:** 2026-11-07 · **عدد النقاط:** 247 (كل `[Http*]` في `src/AlRahma.Api/Controllers`، وكلها موثقة هنا) · **آخر ترحيل:** 027
 هذا ملف العقود الوحيد في المستودعات الثلاثة. القسم الأول يلخّص ما تغيّر منذ الوسم `v1.0-stable` (من `git diff v1.0-stable..staging` على الـ Controllers)، وبعده نص v5 الكامل.
+
+## ما الجديد في v1.3-handoff (منذ v1.2-handoff)
+
+| البند | النقاط والحقول | القسم |
+| --- | --- | --- |
+| «اقترب دورك» يوم الموعد فقط | `queue.turn_soon` بعد بدء العمل؛ لا يُطلقه حجز لأيام قادمة | 18.y |
+| نص إلغاء الطبيب حسب الدفع | `booking.cancelled` مع `link.type = booking_cancel_options` للدافع، وبلا مبلغ لغير الدافع | 18.y |
+| إشعارات الدفع | `online_payment.succeeded`، `online_payment.failed` | 18.y |
+| تأخر الطبيب | **جديد:** `POST /queue/sessions/{id}/delay`، وإشعار `booking.doctor_delayed`، و`doctor_delay_minutes`/`doctor_delay_reason` في `GET /queue/live` (الترحيل 027) | 7 |
+| دور «المتابعة والإشعارات» | `followup` بصلاحيتي `support.manage` و`notifications.branch_view` (الترحيل 027) | 18.y |
+| «حان دورك» وتأكيد «تم» | `POST /me/queue-tickets/{id}/acknowledge-call` (قائمة)، و`call_ack_status` (acknowledged / waiting / no_response) و`call_ack_deadline` و`call_ack_timeout_minutes` في `GET /queue/live` | 7 |
+| مهلة عدم الرد | إعداد الفرع `queue.call_ack_timeout_minutes` (3، من 1 إلى 30) | 7، 18.x |
+| تطبيق المراجع | نغمة وتنبيه منبثق عند `notification.created`، وكتم محلي للصوت؛ شاشة «حان دورك» الكاملة | 7، 18.y |
 
 ## تغييرات v6 منذ v1.0-stable
 
@@ -10,6 +23,9 @@
 | --- | --- | --- |
 | `POST` | `/api/v1/queue/sessions/{sessionId:guid}/delay` | QueueController (الترحيل 027، انظر القسم 7) |
 | `DELETE` | `/api/v1/faq-items/{faqId:guid}` | SupportController |
+| `GET` | `/api/v1/admin/assistant/stats` | AssistantController (الترحيل 026، القسم 22) |
+| `GET` | `/api/v1/me/patients/{patientId:guid}/credit` | PatientAppController (رصيد المحفظة، القسم 22) |
+| `PUT` | `/api/v1/admin/backups/settings` | BackupsController (الترحيل 025، القسم 21.5) |
 | `GET` | `/api/v1/exchange-rates` | CurrencyController |
 | `GET` | `/api/v1/faq-items` | SupportController |
 | `GET` | `/api/v1/files` | FilesController |
@@ -54,7 +70,7 @@
 | الدولار | `GET/PUT /exchange-rates` (سعر صرف اليوم لكل فرع)، وطريقة الدفع `cash_usd` في التحصيل والاسترجاع والحساب اليومي (الترحيل 023) |
 
 ### الترحيلات منذ v1.0-stable
-021 الدعم وخيارات المراجع، 022 فوترة الصيدلية، 023 الدينار والدولار، 024 الاسم الإنجليزي للفرع.
+021 الدعم وخيارات المراجع، 022 فوترة الصيدلية، 023 الدينار والدولار، 024 الاسم الإنجليزي للفرع، 025 النسخ الاحتياطي الأصلي، 026 المساعد الذكي (حد يومي وإحصاءات)، 027 دور المتابعة والإشعارات وتأخر الطبيب.
 
 ---
 

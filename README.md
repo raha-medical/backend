@@ -3,7 +3,7 @@
 ## التشغيل لأول مرة
 1. المتطلبات: .NET 8 SDK، PostgreSQL 16، Node.js 20، والمستودعات الثلاثة (backend, frontend, dock) على الفرع `staging` في مجلد واحد، وانسخ ملفات التشغيل من `dock/local-setup` إلى جذر المجلد (انظر README فيه).
 2. انسخ `.env.example` إلى `.env` (وكلمة مرور PostgreSQL في `local-env.bat` بجانب المستودعات).
-3. `setup-db.bat alrahma_staging`: ينشئ قاعدة فارغة ويطبّق المخطط وكل الترحيلات ثم البيانات التجريبية.
+3. `setup-db.bat alrahma_staging`: ينشئ قاعدة فارغة ويطبّق المخطط ثم **كل** ملفات `database/migrations/*.sql` بالترتيب (حالياً 001 إلى 027، أي ملف جديد يُطبَّق تلقائياً) ثم البيانات التجريبية. `start-native.bat` يطبّق الترحيلات نفسها عند كل تشغيل (آمنة للتكرار).
 4. `..\start-native.bat`: يشغّل الخادم (8089) والواجهة (3001) والتخزين.
 5. الحسابات: [`dock/docs/handoff/accounts.md`](../dock/docs/handoff/accounts.md)، والعقود: [`docs/api_contracts.md`](docs/api_contracts.md).
 
@@ -77,11 +77,33 @@ psql "$DATABASE_URL" -f database/migrations/013_assistant_usage.sql
 psql "$DATABASE_URL" -f database/migrations/014_referrals_and_notifications.sql
 psql "$DATABASE_URL" -f database/migrations/015_entitlements_and_payouts.sql
 psql "$DATABASE_URL" -f database/migrations/016_online_payment_invoice_item.sql
+psql "$DATABASE_URL" -f database/migrations/017_nav_permissions.sql
+psql "$DATABASE_URL" -f database/migrations/018_returning_patients.sql
+psql "$DATABASE_URL" -f database/migrations/019_payment_gateways.sql
+psql "$DATABASE_URL" -f database/migrations/020_daily_account.sql
+psql "$DATABASE_URL" -f database/migrations/021_support_and_patient_options.sql
+psql "$DATABASE_URL" -f database/migrations/022_pharmacy_billing.sql
+psql "$DATABASE_URL" -f database/migrations/023_currencies.sql
+psql "$DATABASE_URL" -f database/migrations/024_branch_name_en.sql
+psql "$DATABASE_URL" -f database/migrations/025_native_backup.sql
+psql "$DATABASE_URL" -f database/migrations/026_assistant_daily.sql
+psql "$DATABASE_URL" -f database/migrations/027_notifications_followup_delay.sql
 ```
 
 **التراجع:** من الترحيل 009 فصاعداً لكل ترحيل سكربت تراجع في `database/migrations/down/` يُشغل بالترتيب العكسي:
 
 ```bash
+psql "$DATABASE_URL" -f database/migrations/down/027_notifications_followup_delay_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/026_assistant_daily_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/025_native_backup_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/024_branch_name_en_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/023_currencies_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/022_pharmacy_billing_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/021_support_and_patient_options_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/020_daily_account_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/019_payment_gateways_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/018_returning_patients_down.sql
+psql "$DATABASE_URL" -f database/migrations/down/017_nav_permissions_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/016_online_payment_invoice_item_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/015_entitlements_and_payouts_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/014_referrals_and_notifications_down.sql

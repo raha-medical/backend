@@ -37,6 +37,8 @@ public class SettingsReader(IAppDbContext db)
     public const string TurnSoonAhead = "queue.turn_soon_ahead";
     public const string AutoCallNext = "queue.auto_call_next";
     public const string CallAlertRepeats = "queue.call_alert_repeats";
+    /// <summary>مهلة رد المراجع على «حان دورك» (دقيقة): بعدها يظهر للاستقبال «لم يرد».</summary>
+    public const string CallAckTimeoutMinutes = "queue.call_ack_timeout_minutes";
     /// <summary>مهلة المحجوز المتأخر (دقيقة): ضمنها يدخل بعد المريض الذي في الغرفة، وبعدها يُخرج من الحساب ويُعامل كمتأخر.</summary>
     public const string NoShowGraceMinutes = "queue.no_show_grace_minutes";
     /// <summary>بعد نهاية الوجبة (الفعلية) بهذه الدقائق يُغلق التسجيل تلقائياً وتُعلّم الحجوزات الباقية غائبة.</summary>

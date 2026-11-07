@@ -1,6 +1,6 @@
 # عقود الـ API - v6
 
-**الإصدار:** v6 · **آخر commit:** `3220d23` (backend، الفرع staging) · **التاريخ:** 2026-11-06
+**الإصدار:** v6 · **آخر commit:** `6010c12` (backend، الفرع staging) · **التاريخ:** 2026-11-07 · **عدد النقاط:** 246 (كل `[Http*]` في `src/AlRahma.Api/Controllers`، وكلها موثقة هنا)
 هذا ملف العقود الوحيد في المستودعات الثلاثة. القسم الأول يلخّص ما تغيّر منذ الوسم `v1.0-stable` (من `git diff v1.0-stable..staging` على الـ Controllers)، وبعده نص v5 الكامل.
 
 ## تغييرات v6 منذ v1.0-stable
@@ -853,6 +853,9 @@
 }
 ```
 * `modality` للأشعة: `xray` | `ultrasound` | `ct` | `mri`.
+
+### `GET /services/{service_id}`
+* خدمة واحدة بنفس شكل عنصر القائمة أعلاه (`ServiceDto`). غير الموجودة: `404`.
 
 ### `POST /services` و `PATCH /services/{service_id}`
 * **الصلاحية:** الإضافة `services.create`، التعديل `services.edit`، والإيقاف (`is_active: false`) يتطلب أيضاً `services.delete`. الرمز `services.manage` (المدير العام ومدير الفرع) يتضمنها كلها.

@@ -233,7 +233,10 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             await orders.SyncAsync(await db.Payments.Where(p => p.OnlinePaymentId == op.OnlinePaymentId)
                 .Join(db.PaymentAllocations, p => p.PaymentId, a => a.PaymentId, (p, a) => a.InvoiceItemId).ToArrayAsync(ct), ct);
         if (op.PatientAccountId is { } account)
+        {
             await realtime.SendAsync(RealtimeGroups.PatientAccount(account), NotificationTypes.OnlinePaymentUpdated, await ToDtoAsync(op, ct));
+            await NotifyPatientResultAsync(op, account, lateSuccess, ct);
+        }
         if (lateSuccess)
         {
             var branchId = await db.Payments.Where(p => p.OnlinePaymentId == op.OnlinePaymentId).Select(p => p.BranchId).FirstAsync(ct);
@@ -241,6 +244,46 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
                 "دفع إلكتروني وصل بعد انتهاء المهلة", $"{op.Amount:N0} د.ع سُجّلت للمريض (على الحجز إن بقي صالحاً، وإلا رصيداً)", "online_payment", op.OnlinePaymentId, ct);
         }
         return op;
+    }
+
+    /// <summary>
+    /// إشعار محفوظ للمريض بنتيجة الدفع (online_payment.succeeded / online_payment.failed)، مرة واحدة عند اكتمال العملية.
+    /// الإلغاء من المريض نفسه لا يُرسل شيئاً.
+    /// </summary>
+    private async Task NotifyPatientResultAsync(OnlinePayment op, Guid account, bool late, CancellationToken ct)
+    {
+        if (op.Status is not (OnlinePaymentStatuses.Succeeded or OnlinePaymentStatuses.Failed or OnlinePaymentStatuses.Expired)) return;
+        var provider = op.Provider switch { "zaincash" => "زين كاش", "qicard" => "كي كارد", _ => op.Provider };
+        var what = op.Purpose switch
+        {
+            OnlinePaymentPurposes.BookingFull => "لحجزك",
+            OnlinePaymentPurposes.BookingDeposit => "عربون حجزك",
+            OnlinePaymentPurposes.UnbanDeposit => "عربون فك إيقاف الحجز",
+            OnlinePaymentPurposes.Invoice => "لفاتورتك",
+            _ => "",
+        };
+        Guid? branch = op.BookingId is { } bid
+            ? await db.Bookings.AsNoTracking().Where(b => b.BookingId == bid).Select(b => (Guid?)b.Session!.BranchId).FirstOrDefaultAsync(ct)
+            : op.InvoiceId is { } iid ? await db.Invoices.AsNoTracking().Where(i => i.InvoiceId == iid).Select(i => (Guid?)i.BranchId).FirstOrDefaultAsync(ct) : null;
+        var (linkType, linkId) = op.BookingId is { } b2 ? ("booking", b2) : ("online_payment", op.OnlinePaymentId);
+        if (op.Status == OnlinePaymentStatuses.Succeeded)
+        {
+            await notifications.NotifyAccountAsync(account, branch, NotificationTypes.OnlinePaymentSucceeded, "تم الدفع بنجاح",
+                $"دفعت {op.Amount:N0} د.ع {what} عبر {provider}." + (late ? " وصل الدفع بعد انتهاء المهلة: سُجّل على الحجز إن بقي صالحاً، وإلا رصيداً في محفظتك." : ""),
+                linkType, linkId, ct);
+            return;
+        }
+        var reason = op.FailureCode switch
+        {
+            "INSUFFICIENT_FUNDS" => "الرصيد غير كافٍ",
+            "CARD_DECLINED" => "رُفضت البطاقة",
+            "TIMEOUT" => "انتهت مهلة الدفع",
+            "GATEWAY_ERROR" => "خطأ لدى بوابة الدفع",
+            _ => op.Status == OnlinePaymentStatuses.Expired ? "انتهت مهلة الدفع" : "لم تكتمل العملية",
+        };
+        await notifications.NotifyAccountAsync(account, branch, NotificationTypes.OnlinePaymentFailed, "لم يكتمل الدفع",
+            $"دفع {op.Amount:N0} د.ع {what} عبر {provider} لم يكتمل: {reason}. لم يُسجَّل المبلغ، ويمكنك المحاولة مرة أخرى من التطبيق.",
+            linkType, linkId, ct);
     }
 
     private async Task ApplySuccessAsync(OnlinePayment op, string transactionId, DateTimeOffset now, CancellationToken ct)

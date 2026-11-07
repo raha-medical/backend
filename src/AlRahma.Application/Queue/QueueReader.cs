@@ -43,6 +43,9 @@ public record LiveQueueDto(Guid SessionId, Guid DoctorId, string DoctorName, Gui
     /// <summary>false = الطبيب لا يقبل «إضافي» فوق السعة.</summary>
     public bool AllowExtra { get; init; } = true;
     public int CapacityTotal { get; init; }
+    /// <summary>«تأخر الطبيب» المعلن (0 = لا تأخير)، وسببه إن ذُكر.</summary>
+    public int DoctorDelayMinutes { get; init; }
+    public string? DoctorDelayReason { get; init; }
 }
 
 public record DisplayBoardDto(string DoctorName, string? NowServing, IReadOnlyList<string> Next);
@@ -130,6 +133,7 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             CallPolicy = await settings.CallPolicyAsync(doctor.Clinic.BranchId, ct),
             DoctorArrivedAt = session.DoctorArrivedAt, ScheduledEnd = session.EndTime.ToString("HH:mm"), Extended = session.ExtendedEndTime is not null,
             RegistrationClosed = session.RegistrationClosedAt is not null, AllowExtra = doctor.AllowExtra, CapacityTotal = session.CapacityTotal,
+            DoctorDelayMinutes = session.DelayMinutes, DoctorDelayReason = session.DelayReason,
         };
     }
 
@@ -259,10 +263,14 @@ public class QueueNotifier(IAppDbContext db, QueueReader reader, IRealtime realt
     }
 
     /// <summary>
-    /// "اقترب دورك": مرة واحدة لكل تذكرة عندما يبقى أمامه queue.turn_soon_ahead مرضى أو أقل (المنتظر في البيت أو في الصالة).
+    /// "اقترب دورك": مرة واحدة لكل تذكرة عندما يبقى أمامه queue.turn_soon_ahead مرضى أو أقل (المنتظر في البيت أو في الصالة)،
+    /// في يوم الموعد فقط وبعد بدء العمل.
     /// </summary>
     private async Task TurnSoonAsync(DoctorSession session, IReadOnlyList<QueueItemDto> items, CancellationToken ct)
     {
+        // يوم الموعد فقط، وبعد بدء العمل فعلاً (وصل الطبيب أو حان وقت البداية بعد أي تأخير معلن). الحجز المسبق لا يُطلق «اقترب دورك».
+        if (session.SessionDate != clock.BaghdadToday()) return;
+        if (session.DoctorArrivedAt is null && clock.UtcNow < QueueEngine.WorkStartUtc(session)) return;
         var ahead = await settings.GetLongAsync(SettingsReader.TurnSoonAhead, session.BranchId, 3, ct);
         var candidates = items.Where(i => i.Status is TicketStatuses.Waiting or TicketStatuses.Arrived && i.QueuePosition is { } p && p - 1 <= ahead)
             .ToList();

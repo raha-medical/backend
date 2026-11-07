@@ -43,13 +43,14 @@ INSERT INTO clinics (clinic_id, branch_id, name, department, floor) VALUES
 -- ------------------------------------------------------------------ أدوار مخصصة للحسابات التجريبية
 INSERT INTO roles (code, name_ar, description, home_section, is_system) VALUES
  ('branch_accountant', 'محاسب فرع', 'مراجعة الحسابات اليومية والاسترجاع والتقارير المالية لفرعه', 'accountant', FALSE),
- ('lab_reception', 'استقبال المختبر', 'تسجيل مراجعي المختبر وتحصيل التحاليل', 'reception', FALSE),
- ('followup', 'موظف المتابعة والإشعارات', 'متابعة طلبات الدعم والإشعارات والمراجعين', NULL, FALSE);
+ ('lab_reception', 'استقبال المختبر', 'تسجيل مراجعي المختبر وتحصيل التحاليل', 'reception', FALSE);
+-- دور followup (المتابعة والإشعارات) يأتي من الترحيل 027؛ هنا فقط صلاحية إضافية للحساب التجريبي
 INSERT INTO role_permissions (role_code, permission) VALUES
  ('branch_accountant', 'shifts.review'), ('branch_accountant', 'refunds.approve'), ('branch_accountant', 'reports.finance'),
  ('branch_accountant', 'payments.collect'), ('branch_accountant', 'expenses.manage'),
  ('lab_reception', 'queue.manage'), ('lab_reception', 'payments.collect'), ('lab_reception', 'patients.write'), ('lab_reception', 'lab.view'),
- ('followup', 'notifications.branch_view'), ('followup', 'support.manage'), ('followup', 'patients.write');
+ ('followup', 'notifications.branch_view'), ('followup', 'support.manage'), ('followup', 'patients.write')
+ON CONFLICT (role_code, permission) DO NOTHING;
 
 -- ------------------------------------------------------------------ الحسابات (كلمة المرور: Rahma-Dev-2026)
 INSERT INTO users (user_id, username, password_hash, full_name, phone_number, role, must_change_password) VALUES

@@ -104,6 +104,10 @@ public class DoctorSession
     public TimeOnly? ExtendedEndTime { get; set; }
     /// <summary>«إغلاق التسجيل»: لا مراجعين جدد بدون حجز.</summary>
     public DateTimeOffset? RegistrationClosedAt { get; set; }
+    /// <summary>«تأخر الطبيب» المعلن من الاستقبال أو الإدارة (دقائق، 0 = لا تأخير). يؤخر بداية العمل حتى يُسجل وصوله.</summary>
+    public short DelayMinutes { get; set; }
+    public string? DelayReason { get; set; }
+    public DateTimeOffset? DelayAnnouncedAt { get; set; }
     public TimeOnly EffectiveEndTime => ExtendedEndTime ?? EndTime;
 
     /// <summary>السعة = مدة الدوام بالدقائق ÷ مدة المعاينة (القسم 3-أ من وثيقة المتطلبات).</summary>

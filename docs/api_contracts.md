@@ -8,6 +8,7 @@
 ### نقاط جديدة
 | الطريقة | المسار | الـ Controller |
 | --- | --- | --- |
+| `POST` | `/api/v1/queue/sessions/{sessionId:guid}/delay` | QueueController (الترحيل 027، انظر القسم 7) |
 | `DELETE` | `/api/v1/faq-items/{faqId:guid}` | SupportController |
 | `GET` | `/api/v1/exchange-rates` | CurrencyController |
 | `GET` | `/api/v1/faq-items` | SupportController |
@@ -1710,6 +1711,15 @@
 
 ### `POST /queue/sessions/{session_id}/registration`
 * `{ "closed": true }` إغلاق التسجيل للمراجعين بدون حجز، و`false` لفتحه. المحجوزون والطابور الحالي لا يتأثرون. نفس الرد.
+* ردود «يوم العيادة المرن» الثلاثة تضيف `doctor_delay_minutes` و`doctor_delay_reason` (الترحيل 027).
+
+### `POST /queue/sessions/{session_id}/delay` (الترحيل 027)
+* **الصلاحية:** `queue.manage` (الاستقبال، ومدير الفرع والمدير العام).
+* **الوصف:** «تأخر الطبيب» لوجبة **اليوم** قبل تسجيل وصوله. بداية العمل تصير بداية الوجبة + التأخير حتى «الطبيب وصل»، وتُعاد الأوقات التقديرية، ويصل كل محجوز لم يدخل بعد إشعار `booking.doctor_delayed` بموعده الجديد (بدل `booking.eta_changed` لنفس الحدث). `minutes: 0` يلغي التأخير ويُخطرهم.
+* **Request:** `{ "minutes": 30, "reason": "عملية طارئة" }` — `minutes` من 0 إلى 240، `reason` اختياري (200 حرف) ويظهر للمراجع.
+* **Response (200):** `{ "session_id", "delay_minutes": 30, "reason": "عملية طارئة", "notified_patients": 4 }`.
+* **أخطاء:** `400 VALIDATION_ERROR`، `422 DELAY_TODAY_ONLY` (وجبة يوم آخر)، `409 SESSION_CANCELLED`، `409 DOCTOR_ALREADY_ARRIVED`، `404 SESSION_NOT_FOUND`.
+* `GET /queue/live` يضيف `doctor_delay_minutes` و`doctor_delay_reason`.
 
 ### الحجز المكرر والتذكيرات (المرحلة 2ب)
 * حجز قائم واحد للمريض عند نفس الطبيب: `409 DUPLICATE_DOCTOR_BOOKING` مع `booking_id` القائم. حجز عند طبيب آخر في نفس اليوم بفارق أقل من 45 دقيقة لا يُمنع، ويعود في الرد `"warnings": [ { "code": "BOOKING_TIME_OVERLAP", "message": "...", "booking_id" } ]`. حد الحجوزات القائمة للمريض `booking.max_open_per_patient` (4): `409 BOOKING_LIMIT`.
@@ -2903,6 +2913,22 @@
 | `queue.call_next_by` | `both` | `doctor` \| `reception` \| `both` |
 
 * إعدادات الاختيار (مثل `queue.call_next_by`) تعرض في القائمة: `value` رقم الخيار (1 إلى 3)، و`value_text` القيمة النصية، و`global_value_text`، و`options: [ { "value": "doctor", "label_ar": "الطبيب فقط" }, ... ]`. في PATCH ترسل النص (`"queue.call_next_by": "doctor"`) أو رقم الخيار. الإعدادات الرقمية لا تتغير.
+
+### 18.y إصلاحات الإشعارات (الترحيل 027)
+
+| النوع | المستلم | متى | `link` |
+| --- | --- | --- | --- |
+| `queue.turn_soon` | المريض | **يوم الموعد فقط** وبعد بدء العمل (وصل الطبيب، أو حانت البداية + التأخير المعلن). الحجز لأيام قادمة لا يُطلقه | `booking` |
+| `booking.cancelled` (دافع) | المريض | إلغاء الطبيب جدوله أو إغلاق العيادة/الفرع وقد دُفع الحجز. العنوان «أُلغي موعدك: اختر ما تريد بمبلغك»، والنص يذكر المبلغ والخيارات: إعادة الحجز، الإبقاء رصيداً، والاسترجاع إلى وسيلة الدفع (الأخير فقط لما دُفع إلكترونياً) | `booking_cancel_options` (رقم الحجز): يفتح «حجوزاتي» على الخيارات |
+| `booking.cancelled` (غير دافع) | المريض | نفس الحدث بلا دفع: لا يُذكر أي مبلغ، ويُقترح إعادة الحجز فقط | `booking` |
+| `booking.doctor_delayed` | المريض | `POST /queue/sessions/{id}/delay` (أو إلغاؤه) | `booking` |
+| `online_payment.succeeded` | حساب المريض الدافع | اكتمال دفع إلكتروني (مع نجاح متأخر) | `booking` أو `online_payment` |
+| `online_payment.failed` | حساب المريض الدافع | فشل الدفع أو انتهاء مهلته لدى البوابة، مع السبب (الرصيد غير كافٍ، رُفضت البطاقة...). إلغاء المريض نفسه لا يُرسل شيئاً | `booking` أو `online_payment` |
+
+* الإشعاران الأخيران مرة واحدة عند اكتمال العملية (الاستعلام المتكرر لا يكررهما)، إضافة إلى حدث `online_payment.updated` المباشر.
+* `link.type` يضيف: `booking_cancel_options` و`online_payment`. تطبيق المريض يقبل أيضاً الرابط `/patient?tab=bookings&cancel_options={booking_id}`.
+* **دور «المتابعة والإشعارات» (`followup`):** صار في الترحيل 027 (كل قاعدة جديدة أو قائمة)، بصلاحيتي `support.manage` و`notifications.branch_view`. غير نظامي (`is_system = false`) فيمكن تعديله من شاشة الأدوار.
+* `DoctorSessions` (الترحيل 027): `delay_minutes` (0 إلى 240)، `delay_reason`، `delay_announced_at`.
 
 ---
 

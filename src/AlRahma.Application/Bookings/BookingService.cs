@@ -21,6 +21,8 @@ public record BookingDto(Guid BookingId, Guid PatientId, string PatientName, Gui
     /// <summary>فرع الموعد: لزر «التوجّه إلى المجمع» بعد الحجز (المرحلة 4).</summary>
     public Guid? BranchId { get; init; }
     public string? BranchName { get; init; }
+    public string? DoctorPhotoUrl { get; init; }
+    public string? ClinicName { get; init; }
     /// <summary>reception | self_qr | null (لم يُثبت حضوره).</summary>
     public string? CheckInMethod { get; init; }
     public DateTimeOffset? CheckedInAt { get; init; }
@@ -72,7 +74,15 @@ public record ReschedulePreviewDto(Guid BookingId, bool Allowed, string? Blocked
     IReadOnlyList<string> ConditionsAr, BookingPolicyDto Policy);
 
 public record PublicDoctorDto(Guid DoctorId, string FullName, string Specialty, string? JobTitle, string ClinicName, string? PhotoUrl,
-    long? NewVisitPrice, long? FollowUpPrice);
+    long? NewVisitPrice, long? FollowUpPrice)
+{
+    public Guid ClinicId { get; init; }
+    /// <summary>أيام الدوام الأسبوعية: 0 = الأحد ... 6 = السبت.</summary>
+    public IReadOnlyList<short> WorkingDays { get; init; } = [];
+    /// <summary>أقرب وجبة مفتوحة فيها حصة حجز خلال 14 يوماً (نفس منطق /availability).</summary>
+    public DateOnly? NextDate { get; init; }
+    public string? NextStart { get; init; }
+}
 public record AvailabilityDay(DateOnly Date, Guid SessionId, string Start, string End, int CapacityTotal, int OnlineRemaining,
     int NextSequenceNumber, DateTimeOffset? NextEstimatedTime, string Status, string? CancelReason);
 public record AvailabilityDto(Guid DoctorId, IReadOnlyList<AvailabilityDay> Days);
@@ -117,8 +127,27 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
             .Select(s => new { s.ClinicId, s.VisitKind, s.Price }).ToListAsync(ct);
         long? Price(Guid clinic, string kind) => prices.FirstOrDefault(p => p.ClinicId == clinic && p.VisitKind == kind)?.Price;
 
-        return list.Select(d => new PublicDoctorDto(d.DoctorId, d.FullName, d.Specialty, d.JobTitle, d.Clinic!.Name, files.PhotoUrl(d.PhotoObjectKey),
-            Price(d.ClinicId, VisitKinds.NewVisit), Price(d.ClinicId, VisitKinds.FollowUp))).ToList();
+        var doctorIds = list.Select(d => d.DoctorId).ToList();
+        var templates = await db.DoctorScheduleTemplates.AsNoTracking()
+            .Where(t => doctorIds.Contains(t.DoctorId) && t.BranchId == branchId && t.IsActive)
+            .Select(t => new { t.DoctorId, t.Weekday }).ToListAsync(ct);
+        var today = clock.BaghdadToday();
+        var result = new List<PublicDoctorDto>();
+        foreach (var d in list)
+        {
+            // نفس منطق شاشة الحجز، حتى لا تعد البطاقة بموعد ملغى أو ممتلئ
+            var days = (await AvailabilityAsync(d.DoctorId, today, today.AddDays(13), ct)).Days;
+            var next = days.FirstOrDefault(x => x.Status == SessionStatuses.Open && x.OnlineRemaining > 0);
+            var weekdays = templates.Where(t => t.DoctorId == d.DoctorId).Select(t => t.Weekday)
+                .Concat(days.Where(x => x.Status != SessionStatuses.Cancelled).Select(x => (short)x.Date.DayOfWeek))
+                .Distinct().Order().ToList();
+            result.Add(new PublicDoctorDto(d.DoctorId, d.FullName, d.Specialty, d.JobTitle, d.Clinic!.Name, files.PhotoUrl(d.PhotoObjectKey),
+                Price(d.ClinicId, VisitKinds.NewVisit), Price(d.ClinicId, VisitKinds.FollowUp))
+            {
+                ClinicId = d.ClinicId, WorkingDays = weekdays, NextDate = next?.Date, NextStart = next?.Start,
+            });
+        }
+        return result;
     }
 
     public async Task<AvailabilityDto> AvailabilityAsync(Guid doctorId, DateOnly? from, DateOnly? to, CancellationToken ct)
@@ -716,6 +745,7 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
             .ToDictionaryAsync(t => t.BookingId!.Value, ct);
         var doctorIds = list.Select(b => b.Session!.DoctorId).Distinct().ToList();
         var names = await db.Doctors.Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId, d => d.FullName, ct);
+        var doctorInfo = await db.Doctors.AsNoTracking().Include(d => d.Clinic).Where(d => doctorIds.Contains(d.DoctorId)).ToDictionaryAsync(d => d.DoctorId, ct);
         // طبيب بلا عربون (0): لا يُعرض خيار العربون الإلكتروني
         var noDeposit = await db.Doctors.Where(d => doctorIds.Contains(d.DoctorId) && d.OnlineDepositAmount == 0).Select(d => d.DoctorId).ToListAsync(ct);
         var appOptionsNoDeposit = AppPaymentOptions.Where(o => o != "pay_deposit_online").ToArray();
@@ -739,6 +769,8 @@ public class BookingService(IAppDbContext db, ICurrentUser current, IAuditLogger
                 CancelOptionsPending = b.Status == BookingStatuses.Cancelled && b.CancelledBy != "patient" && b.Session.Status == SessionStatuses.Cancelled
                                        && b.PaymentStatus == PaymentStatuses.Credited && b.CancelResolution == null,
                 BranchId = b.Session.BranchId, BranchName = branchNames.GetValueOrDefault(b.Session.BranchId),
+                DoctorPhotoUrl = doctorInfo.TryGetValue(b.Session.DoctorId, out var di) ? files.PhotoUrl(di.PhotoObjectKey) : null,
+                ClinicName = di?.Clinic?.Name,
             };
         }).ToList();
     }

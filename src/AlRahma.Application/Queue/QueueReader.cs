@@ -25,6 +25,8 @@ public record QueueItemDto(Guid TicketId, string TicketNumber, Guid PatientId, s
     public int? OnTheWayEtaMinutes { get; init; }
     /// <summary>مراجع «إضافي» فوق السعة.</summary>
     public bool IsExtra { get; init; }
+    /// <summary>مجموع البنود غير المدفوعة للمراجع في هذا الفرع: الكشفية وما طلبه الطبيب بعدها.</summary>
+    public long OutstandingAmount { get; init; }
     /// <summary>حالة العرض: awaiting_results | ready_to_return | returning | awaiting_payment (حاضر — بانتظار الدفع) | null.</summary>
     public string? DisplayState { get; init; }
     /// <summary>نص الشارة: «بانتظار المختبر والأشعة» / «جاهز للعودة» / «عائد بالنتائج» / «حاضر — بانتظار الدفع».</summary>
@@ -82,6 +84,11 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
             .Where(i => i.TicketId != null && ticketIds.Contains(i.TicketId.Value) && i.Status != InvoiceItemStatuses.Void)
             .ToListAsync(ct);
         var byTicket = items.GroupBy(i => i.TicketId!.Value).ToDictionary(g => g.Key, g => g.OrderByDescending(i => i.CreatedAt).First());
+        var patientIds = tickets.Select(t => t.PatientId).Distinct().ToList();
+        var dues = (await Billing.PaymentService.CollectableItems(db)
+                .Join(db.Invoices.AsNoTracking().Where(v => v.BranchId == session.BranchId && v.Status != InvoiceStatuses.Void && patientIds.Contains(v.PatientId)), i => i.InvoiceId, v => v.InvoiceId, (i, v) => new { v.PatientId, i.NetPrice })
+                .ToListAsync(ct))
+            .GroupBy(x => x.PatientId).ToDictionary(g => g.Key, g => g.Sum(x => x.NetPrice));
         var awaitingIds = tickets.Where(t => t.Status == TicketStatuses.AwaitingResults).Select(t => t.TicketId).ToList();
         // رد المراجع على الاستدعاء: فقط لمن له حساب في التطبيق (غيره لا يستطيع الضغط على «تم»)
         var calledPatients = tickets.Where(t => t.Status == TicketStatuses.Called).Select(t => t.PatientId).Distinct().ToList();
@@ -148,6 +155,7 @@ public class QueueReader(IAppDbContext db, IClock clock, QueueEngine engine, Set
                 {
                     CallAcknowledgedAt = t.CallAcknowledgedAt, CallAlertsSent = t.CallAlertsSent, CallAckStatus = ack.Status, CallAckDeadline = ack.Deadline,
                     OnTheWayAt = t.OnTheWayAt, OnTheWayEtaMinutes = t.OnTheWayEtaMinutes, IsExtra = t.IsExtra,
+                    OutstandingAmount = dues.GetValueOrDefault(t.PatientId),
                     DisplayState = display.State, DisplayStateAr = display.Ar, AwaitingServices = display.Services,
                     AwaitingSince = t.AwaitingSince, ReturnedAt = t.ReturnedAt, OriginalTicketId = t.OriginalTicketId,
                 };

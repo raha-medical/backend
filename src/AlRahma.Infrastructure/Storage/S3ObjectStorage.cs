@@ -23,13 +23,17 @@ public sealed class S3ObjectStorage : IObjectStorage, IDisposable
 {
     private readonly AmazonS3Client _internal;
     private readonly AmazonS3Client _public;
+    private readonly Protocol _publicProtocol;
 
     public S3ObjectStorage(IOptions<StorageOptions> options)
     {
         var o = options.Value;
         Bucket = o.Bucket;
+        var publicUrl = string.IsNullOrWhiteSpace(o.PublicUrl) ? o.ServiceUrl : o.PublicUrl;
         _internal = Create(o, o.ServiceUrl);
-        _public = Create(o, string.IsNullOrWhiteSpace(o.PublicUrl) ? o.ServiceUrl : o.PublicUrl);
+        _public = Create(o, publicUrl);
+        // GetPreSignedURL يتجاهل UseHttp ويفترض HTTPS، فيجب تحديد البروتوكول في كل طلب.
+        _publicProtocol = publicUrl.StartsWith("http://", StringComparison.OrdinalIgnoreCase) ? Protocol.HTTP : Protocol.HTTPS;
     }
 
     public string Bucket { get; }
@@ -49,6 +53,7 @@ public sealed class S3ObjectStorage : IObjectStorage, IDisposable
             BucketName = Bucket,
             Key = objectKey,
             Verb = HttpVerb.PUT,
+            Protocol = _publicProtocol,
             ContentType = contentType,
             Expires = DateTime.UtcNow.Add(expiresIn),
         });
@@ -59,6 +64,7 @@ public sealed class S3ObjectStorage : IObjectStorage, IDisposable
             BucketName = Bucket,
             Key = objectKey,
             Verb = HttpVerb.GET,
+            Protocol = _publicProtocol,
             Expires = DateTime.UtcNow.Add(expiresIn),
         });
 

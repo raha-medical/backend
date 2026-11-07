@@ -41,7 +41,7 @@ public record PublicBranchDto(Guid BranchId, string Code, string Name, string? C
     public string? Whatsapp { get; init; }
     public string? WhatsappUrl => Support.SupportService.WhatsappUrl(Whatsapp);
 }
-public record PublicClinicDto(Guid ClinicId, string Name, short? Floor, bool IsOpenToday, string? ClosureLabel, DateOnly? ClosedUntil);
+public record PublicClinicDto(Guid ClinicId, string Name, short? Floor, bool IsOpenToday, string? ClosureLabel, DateOnly? ClosedUntil, int DoctorsCount = 0);
 public record PublicDepartmentDto(string Department, string DepartmentAr, IReadOnlyList<PublicClinicDto> Clinics);
 public record PublicSpecialtyDto(string Code, string NameAr, int DoctorsCount);
 public record ScheduleConflictDto(Guid SessionId, Guid DoctorId, string DoctorName, string ClinicName, DateOnly Date, string WeekdayAr,
@@ -184,13 +184,16 @@ public class BranchPortalService(IAppDbContext db, IClock clock, BranchService b
         var names = await closures.ReasonNamesAsync(ct);
         var today = clock.BaghdadToday();
         var branchClosedToday = info.Status == "closed";
+        var clinicIds = clinics.Select(c => c.ClinicId).ToList();
+        var doctorsByClinic = await db.Doctors.AsNoTracking().Where(d => d.IsActive && clinicIds.Contains(d.ClinicId))
+            .GroupBy(d => d.ClinicId).Select(g => new { g.Key, Count = g.Count() }).ToDictionaryAsync(x => x.Key, x => x.Count, ct);
         var departments = BranchService.Departments
             .Select(dep => new PublicDepartmentDto(dep, DepartmentsAr[dep], clinics.Where(c => c.Department == dep).Select(c =>
             {
                 closureMap.TryGetValue(c.ClinicId, out var cl);
                 var closedToday = cl is not null && cl.Covers(today);
                 return new PublicClinicDto(c.ClinicId, c.Name, c.Floor, !branchClosedToday && !closedToday,
-                    closedToday ? ClosureService.Label(cl!, names) : null, closedToday ? cl!.EndsOn : null);
+                    closedToday ? ClosureService.Label(cl!, names) : null, closedToday ? cl!.EndsOn : null, doctorsByClinic.GetValueOrDefault(c.ClinicId));
             }).ToList()))
             .Where(d => d.Clinics.Count > 0)
             .ToList();

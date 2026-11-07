@@ -178,7 +178,8 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
                 throw new AppException(422, "ACCOUNT_NOT_FOUND", "رقم المحفظة غير مسجل في زين كاش");
             if (outcome == MockGatewayTestData.Outcomes.GatewayError)
                 throw new AppException(503, "GATEWAY_UNAVAILABLE", "تعذر الاتصال بالبوابة", "أعد المحاولة بعد قليل");
-            tx.TestAccount = wallet;
+            // لا يُخزَّن الرقم نفسه: تكفي نتيجة الحساب التجريبي لخطوة الرمز، والرقم المخفي للعرض
+            tx.TestAccount = outcome;
             tx.AccountMasked = wallet![..5] + "****" + wallet[^4..];
             secretOk = req.Pin == MockGatewayTestData.ZainCashPin;
             if (!secretOk) return await WrongSecretAsync(tx, "WRONG_PIN", "الرمز السري غير صحيح", ct);
@@ -191,7 +192,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
                 .Check(req.Cvv is { Length: 3 } && req.Cvv.All(char.IsDigit), "cvv", "CVV ثلاثة أرقام").ThrowIfInvalid();
             if (!MockGatewayTestData.Cards.TryGetValue(card, out outcome!))
                 throw new AppException(422, "CARD_NOT_FOUND", "البطاقة غير معروفة لدى كي كارد");
-            tx.TestAccount = card;
+            tx.TestAccount = outcome;
             tx.AccountMasked = card[..4] + " **** **** " + card[^4..];
             TryExpiry(req.Expiry, out var exp);
             if (exp < new DateOnly(now.Year, now.Month, 1))
@@ -230,7 +231,7 @@ public class MockGatewayService(IAppDbContext db, IClock clock, PatientPortalSer
             throw new AppException(422, "WRONG_OTP", "رمز التحقق غير صحيح", $"المحاولات المتبقية {MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts}")
                 { Extensions = new Dictionary<string, object?> { ["attempts_left"] = MockGatewayTestData.MaxOtpAttempts - tx.OtpAttempts } };
         }
-        var outcome = tx.Provider == "zaincash" ? MockGatewayTestData.Wallets[tx.TestAccount!] : MockGatewayTestData.Cards[tx.TestAccount!];
+        var outcome = tx.TestAccount!;
         if (outcome == MockGatewayTestData.Outcomes.Timeout)
         {
             // البوابة لا ترد: المعاملة تبقى pending حتى تنتهي مهلتها، ثم يعطي الاستعلام failed/TIMEOUT

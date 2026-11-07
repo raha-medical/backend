@@ -97,7 +97,7 @@ public class OnlinePaymentService(IAppDbContext db, ICurrentUser current, IAudit
             && o.BookingId == bookingId && o.InvoiceId == invoiceId && o.InvoiceItemId == invoiceItemId && o.Status == OnlinePaymentStatuses.Pending, ct);
         if (pending is not null)
             throw new AppException(409, "PAYMENT_PENDING", "توجد عملية دفع معلقة لنفس الغرض", "أكملها أو انتظر انتهاءها")
-                { Extensions = new Dictionary<string, object?> { ["online_payment_id"] = pending.OnlinePaymentId } };
+                { Extensions = new Dictionary<string, object?> { ["online_payment_id"] = pending.OnlinePaymentId, ["provider_reference"] = pending.ProviderReference, ["provider"] = pending.Provider, ["amount"] = pending.Amount } };
 
         var op = new OnlinePayment
         {

@@ -246,6 +246,9 @@
 * توكن المريض يحمل `role: "patient"`، ولا يصل إلى أي endpoint للموظفين. أي `patient_id` غير مربوط بحسابه يعيد `404 PATIENT_NOT_FOUND`.
 * **الوضع التجريبي (Sandbox) مفعّل حالياً** (`Otp__Mode=sandbox`): لا تُرسل رسالة SMS، والرمز ثابت **`000000`** لكل الأرقام، ويعود في الرد كحقل `sandbox_code`. عند ربط مزود SMS يتحول إلى `Otp__Mode=sms` بلا أي تغيير في الواجهة (فقط يختفي `sandbox_code`).
 
+#### `GET /me/wallet`
+* **الصلاحية:** المراجع. **Response (200):** `{ "total_balance": 20000, "patients": [ { "patient_id": "...", "full_name": "...", "balance": 20000, "entries": [ { "entry_id": "...", "amount": 20000, "kind": "booking_cancel_credit", "kind_ar": "استرجاع حجز ملغى", "created_at": "..." } ] } ] }`.
+
 #### `POST /patient-auth/otp/request`
 * **الصلاحية:** Public.
 * **Request:** `{ "phone_number": "07801234567" }` (يقبل `+964` و `964` والأرقام العربية، ويوحّدها إلى `07XXXXXXXXX`).
@@ -2232,7 +2235,7 @@
 ```
 * `declared.cash` إلزامي (صفر إن لم يوجد نقد). `cash_denominations` اختياري ويساعد في التدقيق.
 * كل نقطة تحصيل (عيادة، مختبر، أشعة) تغلق ورديتها بشكل مستقل (انظر 8.0).
-* **Response (200) للموظف:** كائن الوردية بحالة `closed_pending_review`. **الموظف لا يرى الفرق.**
+* **Response (200) للموظف:** كائن الوردية بحالة `closed_pending_review`، ومعه `variance_cash` و`variance_pos` و`variance_usd`. الموظف يرى الفرق بعد الإغلاق فقط، ولا يرى المتوقع قبله.
 * النتيجة تظهر للمحاسب فقط عبر المطابقة، ويصله حدث فوري `shift.closed` على `branch:{id}:finance`: `{ "shift_id", "user_id", "audit_status", "variance_total" }`.
 
 ### `GET /shifts/{shift_id}/reconciliation`

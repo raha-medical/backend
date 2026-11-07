@@ -52,6 +52,11 @@ public class MyPatientsController(PatientPortalService portal, ConsultationServi
     [HttpGet]
     public async Task<IActionResult> List(CancellationToken ct) => Ok(new { items = await portal.ListAsync(ct) });
 
+    /// <summary>المحفظة: رصيد ملفات الحساب ومصدر كل حركة.</summary>
+    [HttpGet("/api/v1/me/wallet")]
+    [ProducesResponseType<WalletDto>(200)]
+    public Task<WalletDto> Wallet(CancellationToken ct) => portal.WalletAsync(ct);
+
     [HttpPost]
     [Idempotent]
     [ProducesResponseType<MyPatientDto>(201)]

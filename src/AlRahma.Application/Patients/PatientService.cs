@@ -50,7 +50,7 @@ public class PatientService(IAppDbContext db, ICurrentUser current, IAuditLogger
             PatientId = id,
             FileNumber = $"{code}-{seq:D6}",
             FullName = name,
-            PhoneNumber = phone!,
+            PhoneNumber = phone ?? "",
             BirthDate = req.BirthDate,
             ApproxAge = req.BirthDate is null ? req.ApproxAge : null,
             Gender = req.Gender,
@@ -280,8 +280,7 @@ public class PatientService(IAppDbContext db, ICurrentUser current, IAuditLogger
         new Validator()
             .Check(!required || !string.IsNullOrWhiteSpace(name), "full_name", "الاسم مطلوب")
             .Check(name is null || (name.Trim().Length is >= 2 and <= 150), "full_name", "الاسم بين 2 و 150 حرفاً")
-            .Check(!required || rawPhone is not null, "phone_number", "رقم الهاتف مطلوب")
-            .Check(rawPhone is null || phone is not null, "phone_number", "رقم هاتف عراقي غير صالح (07XXXXXXXXX)")
+            .Check(string.IsNullOrWhiteSpace(rawPhone) || phone is not null, "phone_number", "رقم هاتف عراقي غير صالح (07XXXXXXXXX)")
             .Check(birth is null || (birth.Value.Year >= 1890 && birth.Value <= DateOnly.FromDateTime(DateTime.UtcNow.AddHours(3))), "birth_date", "تاريخ ميلاد غير صالح")
             .Check(age is null || age is >= 0 and <= 130, "approx_age", "العمر بين 0 و 130")
             .Check(gender is null or "male" or "female", "gender", "الجنس: male أو female")

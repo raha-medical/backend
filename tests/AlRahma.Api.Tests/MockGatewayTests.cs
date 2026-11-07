@@ -86,7 +86,7 @@ public class MockGatewayTests(TestApp app)
 
         var page = await Api.GetAsync(me, $"/api/v1/mock-gateway/{reference}");
         Assert.Equal("credentials", S(page.Body, "step"));
-        Assert.Equal("ACCOUNT_NOT_FOUND", (await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { wallet_number = "07809999999", pin = "1234" })).Code);
+        Assert.Equal(400, (await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { wallet_number = "123", pin = "1234" })).Status);
         var wrong = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { wallet_number = MockPay.Wallet, pin = "9999" });
         Assert.Equal("WRONG_PIN", wrong.Code);
         var cred = await Api.PostAsync(me, $"/api/v1/mock-gateway/{reference}/credentials", new { wallet_number = MockPay.Wallet, pin = MockPay.Pin });

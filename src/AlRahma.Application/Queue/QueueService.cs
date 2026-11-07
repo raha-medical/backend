@@ -30,7 +30,15 @@ public record CheckInResponse(Guid TicketId, string TicketNumber, string Status,
 /// <summary>«تمديد اليوم»: النهاية الفعلية الجديدة HH:mm (الجدول الأسبوعي لا يتغير).</summary>
 public record ExtendSessionRequest(string? End);
 public record SessionRegistrationRequest(bool? Closed);
-public record SessionControlDto(Guid SessionId, string Start, string End, string ScheduledEnd, DateTimeOffset? DoctorArrivedAt, bool RegistrationClosed);
+public record SessionControlDto(Guid SessionId, string Start, string End, string ScheduledEnd, DateTimeOffset? DoctorArrivedAt, bool RegistrationClosed)
+{
+    /// <summary>«تأخر الطبيب» المعلن (0 = لا تأخير).</summary>
+    public int DoctorDelayMinutes { get; init; }
+    public string? DoctorDelayReason { get; init; }
+}
+/// <summary>«تأخر الطبيب»: minutes من 0 (إلغاء التأخير) إلى 240، والسبب اختياري يظهر للمراجع.</summary>
+public record DoctorDelayRequest(int? Minutes, string? Reason);
+public record DoctorDelayResponse(Guid SessionId, int DelayMinutes, string? Reason, int NotifiedPatients);
 public record TicketActionResponse(Guid TicketId, string TicketNumber, string Status, string Priority, short? QueuePosition,
     DateTimeOffset? EstimatedTime, DateTimeOffset? CalledAt, DateTimeOffset? StartedAt, DateTimeOffset? CompletedAt)
 {
@@ -58,7 +66,7 @@ internal sealed record CheckInContext(Guid BranchId, string Method);
 public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger audit, IClock clock, QueueEngine engine,
     QueueReader reader, QueueNotifier notifier, DoctorService doctors, BanService bans,
     AlRahma.Application.Branches.ClosureService closures, SettingsReader settings, OperationClock op,
-    CheckInTokenService checkInTokens, PatientApp.PatientPortalService portal)
+    CheckInTokenService checkInTokens, PatientApp.PatientPortalService portal, Notifications.NotificationService notifications)
 {
     // ------------------------------------------------------------------ القراءة
 
@@ -538,7 +546,63 @@ public class QueueService(IAppDbContext db, ICurrentUser current, IAuditLogger a
         if (tx is not null) await tx.CommitAsync(ct);
         await notifier.SessionChangedAsync(session.SessionId, ct);
         return new SessionControlDto(session.SessionId, session.StartTime.ToString("HH:mm"), session.EffectiveEndTime.ToString("HH:mm"),
-            session.EndTime.ToString("HH:mm"), session.DoctorArrivedAt, session.RegistrationClosedAt is not null);
+            session.EndTime.ToString("HH:mm"), session.DoctorArrivedAt, session.RegistrationClosedAt is not null)
+            { DoctorDelayMinutes = session.DelayMinutes, DoctorDelayReason = session.DelayReason };
+    }
+
+    /// <summary>
+    /// «تأخر الطبيب»: يسجله الاستقبال أو الإدارة لوجبة اليوم قبل وصول الطبيب. تُعاد الأوقات التقديرية، ويصل كل محجوز
+    /// لم يدخل بعد إشعار booking.doctor_delayed بموعده الجديد (بدل إشعار تغير الموعد العام، فلا يتكرر). minutes = 0 يلغي التأخير.
+    /// </summary>
+    public async Task<DoctorDelayResponse> DoctorDelayAsync(Guid sessionId, DoctorDelayRequest req, CancellationToken ct)
+    {
+        new Validator()
+            .Check(req.Minutes is >= 0 and <= 240, "minutes", "من 0 (إلغاء التأخير) إلى 240 دقيقة")
+            .Check(req.Reason is null || req.Reason.Trim().Length <= 200, "reason", "200 حرف كحد أقصى")
+            .ThrowIfInvalid();
+        var reason = string.IsNullOrWhiteSpace(req.Reason) ? null : req.Reason.Trim();
+        DoctorSession session;
+        string doctorName;
+        await using (var tx = await db.BeginTransactionAsync(ct))
+        {
+            await engine.LockSessionAsync(sessionId, ct);
+            session = await db.DoctorSessions.FirstOrDefaultAsync(s => s.SessionId == sessionId && s.BranchId == current.BranchId, ct)
+                      ?? throw new AppException(404, "SESSION_NOT_FOUND", "الوجبة غير موجودة");
+            var doctor = await LoadDoctorAsync(session.DoctorId, ct);
+            await EnsureScopeAsync(doctor, ct);
+            doctorName = doctor.FullName;
+            if (session.SessionDate != clock.BaghdadToday())
+                throw new AppException(422, "DELAY_TODAY_ONLY", "التأخير يُسجل لوجبة اليوم فقط", "لإلغاء يوم كامل استخدم إلغاء وجبة الطبيب");
+            if (session.Status == SessionStatuses.Cancelled)
+                throw new AppException(409, "SESSION_CANCELLED", "الوجبة ملغاة");
+            if (session.DoctorArrivedAt is not null)
+                throw new AppException(409, "DOCTOR_ALREADY_ARRIVED", "سُجّل وصول الطبيب، فالأوقات تُحسب من وصوله");
+            var before = new { session.DelayMinutes, session.DelayReason };
+            session.DelayMinutes = (short)req.Minutes!.Value;
+            session.DelayReason = session.DelayMinutes > 0 ? reason : null;
+            session.DelayAnnouncedAt = session.DelayMinutes > 0 ? op.Now : null;
+            audit.Add("DOCTOR_DELAY_SET", "doctor_session", session.SessionId, before: before, after: new { session.DelayMinutes, session.DelayReason });
+            await db.SaveChangesAsync(ct);
+            await engine.RecalculateAsync(session, ct);
+            if (tx is not null) await tx.CommitAsync(ct);
+        }
+        // الإشعار الخاص يغني عن «تغير موعدك التقريبي» لنفس الحجوزات
+        engine.PendingEtaChanges.Clear();
+        var waiting = await (from t in db.QueueTickets.AsNoTracking()
+                             join b in db.Bookings.AsNoTracking() on t.BookingId equals b.BookingId
+                             where t.SessionId == session.SessionId && (t.Status == TicketStatuses.Waiting || t.Status == TicketStatuses.Arrived)
+                                   && (b.Status == BookingStatuses.Booked || b.Status == BookingStatuses.CheckedIn)
+                             select new { b.BookingId, b.PatientId, Eta = t.EstimatedTime ?? b.EstimatedTime }).ToListAsync(ct);
+        foreach (var w in waiting)
+        {
+            var eta = w.Eta is { } e ? $" موعد دخولك التقريبي الآن {e.ToOffset(ClockExtensions.BaghdadOffset):HH:mm}." : "";
+            var (title, message) = session.DelayMinutes > 0
+                ? ("تأخر الطبيب", $"{doctorName} يتأخر نحو {session.DelayMinutes} دقيقة اليوم{(reason is null ? "" : $" ({reason})")}.{eta} نعتذر عن الانتظار.")
+                : ("انتهى تأخر الطبيب", $"{doctorName} يبدأ في موعده.{eta}");
+            await notifications.NotifyPatientAsync(w.PatientId, session.BranchId, Notifications.NotificationTypes.DoctorDelayed, title, message, "booking", w.BookingId, ct);
+        }
+        await notifier.SessionChangedAsync(session.SessionId, ct);
+        return new DoctorDelayResponse(session.SessionId, session.DelayMinutes, session.DelayReason, waiting.Count);
     }
 
     // ------------------------------------------------------------------ أزرار الطابور

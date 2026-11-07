@@ -78,6 +78,11 @@ public class QueueController(QueueService queue, DeviceService devices) : Contro
     [ProducesResponseType<SessionControlDto>(200)]
     public Task<SessionControlDto> DoctorArrived(Guid sessionId, CancellationToken ct) => queue.DoctorArrivedAsync(sessionId, ct);
 
+    /// <summary>«تأخر الطبيب»: { "minutes": 30, "reason": "..." } لوجبة اليوم قبل وصوله؛ يُخطر المحجوزين. minutes = 0 يلغيه.</summary>
+    [HttpPost("api/v1/queue/sessions/{sessionId:guid}/delay")]
+    [ProducesResponseType<DoctorDelayResponse>(200)]
+    public Task<DoctorDelayResponse> Delay(Guid sessionId, DoctorDelayRequest req, CancellationToken ct) => queue.DoctorDelayAsync(sessionId, req, ct);
+
     /// <summary>«تمديد اليوم»: { "end": "23:30" } نهاية فعلية لهذه الوجبة فقط.</summary>
     [HttpPost("api/v1/queue/sessions/{sessionId:guid}/extend")]
     [ProducesResponseType<SessionControlDto>(200)]

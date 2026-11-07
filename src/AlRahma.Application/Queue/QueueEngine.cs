@@ -26,9 +26,15 @@ public class QueueEngine(IAppDbContext db, ICurrentUser current, IClock clock, N
     public static DateTimeOffset SessionStartUtc(DoctorSession s) => ClockExtensions.ToUtc(s.SessionDate, s.StartTime);
     /// <summary>النهاية الفعلية: «تمديد اليوم» إن وُجد، وإلا نهاية الجدول.</summary>
     public static DateTimeOffset SessionEndUtc(DoctorSession s) => ClockExtensions.ToUtc(s.SessionDate, s.EffectiveEndTime);
-    /// <summary>بداية العمل الفعلية: وقت «الطبيب وصل» إن تأخر عن بداية الوجبة.</summary>
-    public static DateTimeOffset WorkStartUtc(DoctorSession s) =>
-        s.DoctorArrivedAt is { } a && a > SessionStartUtc(s) ? a : SessionStartUtc(s);
+    /// <summary>
+    /// بداية العمل الفعلية: وقت «الطبيب وصل» إن تأخر عن بداية الوجبة. قبل وصوله: البداية + «تأخر الطبيب» المعلن إن وُجد.
+    /// </summary>
+    public static DateTimeOffset WorkStartUtc(DoctorSession s)
+    {
+        var start = SessionStartUtc(s);
+        if (s.DoctorArrivedAt is { } a) return a > start ? a : start;
+        return s.DelayMinutes > 0 ? start.AddMinutes(s.DelayMinutes) : start;
+    }
 
     public static DateTimeOffset ScheduledTime(DoctorSession s, int sequence) =>
         SessionStartUtc(s).AddMinutes((sequence - 1) * s.SlotMinutes);

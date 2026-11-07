@@ -1606,3 +1606,18 @@ CREATE TABLE IF NOT EXISTS assistant_proposals (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_assistant_proposals_created ON assistant_proposals(created_at);
+
+-- =============================================================================
+-- ترحيل 027: دور «المتابعة والإشعارات» (followup)، و«تأخر الطبيب» المعلن لوجبة اليوم
+-- =============================================================================
+INSERT INTO roles (code, name_ar, description, home_section, is_system) VALUES
+    ('followup', 'موظف المتابعة والإشعارات', 'متابعة طلبات الدعم والرد عليها، ومتابعة إشعارات الفرع', NULL, FALSE)
+ON CONFLICT (code) DO NOTHING;
+INSERT INTO role_permissions (role_code, permission) VALUES
+    ('followup', 'support.manage'), ('followup', 'notifications.branch_view')
+ON CONFLICT (role_code, permission) DO NOTHING;
+ALTER TABLE doctor_sessions ADD COLUMN IF NOT EXISTS delay_minutes      SMALLINT NOT NULL DEFAULT 0;
+ALTER TABLE doctor_sessions ADD COLUMN IF NOT EXISTS delay_reason       TEXT;
+ALTER TABLE doctor_sessions ADD COLUMN IF NOT EXISTS delay_announced_at TIMESTAMPTZ;
+ALTER TABLE doctor_sessions DROP CONSTRAINT IF EXISTS doctor_sessions_delay_minutes_check;
+ALTER TABLE doctor_sessions ADD CONSTRAINT doctor_sessions_delay_minutes_check CHECK (delay_minutes BETWEEN 0 AND 240);

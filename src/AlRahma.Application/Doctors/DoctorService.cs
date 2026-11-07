@@ -404,7 +404,7 @@ public class DoctorService(IAppDbContext db, ICurrentUser current, IAuditLogger 
 
         audit.Add("SESSION_CANCELLED", "doctor", doctorId, after: new { date, session_ids = ids, affected_bookings = affected, credited_bookings = credited }, reason: req.Reason);
         await db.SaveChangesAsync(ct);
-        await notifications.BookingsCancelledAsync(notify, "إلغاء وجبة الطبيب: " + req.Reason!.Trim(), ct);
+        await notifications.BookingsCancelledAsync(notify, req.Reason!.Trim(), ct); // النص يبدأ بـ «ألغى الطبيب موعدك»، فالسبب وحده
         // المرحلة 3: تحديث مباشر للاستقبال وتطبيق المريض والشاشات
         foreach (var s in sessions) await notifier.SessionChangedAsync(s.SessionId, ct);
         foreach (var b in notify) await notifier.BookingChangedAsync(b.BookingId, Queue.BookingChangeActions.Cancelled, null, ct);

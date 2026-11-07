@@ -52,6 +52,9 @@ public static class NotificationTypes
     public const string FastForwardOffer = "fast_forward.offer";
     public const string PatientBanned = "patient.banned";
     public const string OnlinePaymentUpdated = "online_payment.updated";
+    public const string OnlinePaymentSucceeded = "online_payment.succeeded";
+    public const string OnlinePaymentFailed = "online_payment.failed";
+    public const string DoctorDelayed = "booking.doctor_delayed";
     public const string PaymentRefunded = "payment.refunded";
     public const string CreditAdded = "credit.added";
     public const string QueueTurnSoon = "queue.turn_soon";
@@ -162,19 +165,50 @@ public class NotificationService(IAppDbContext db, ICurrentUser current, IClock 
         await realtime.SendAsync(RealtimeGroups.PatientAccount(accountId), "notification.created", ToDto(n));
     }
 
+    /// <summary>حجز نشط في وجبات ستُلغى (يُقرأ قبل تنفيذ الإلغاء): هل دُفع، وكم، وهل إلكترونياً (للاسترجاع).</summary>
+    public record CancelledBooking(Guid BookingId, Guid PatientId, Guid BranchId, DateOnly Date, Guid DoctorId, string DoctorName, bool Paid, long Amount, bool PaidOnline);
+
     /// <summary>إشعار booking.cancelled لمرضى الحجوزات النشطة في الوجبات قبل إلغائها (تُقرأ قبل تنفيذ الإلغاء).</summary>
-    public async Task<List<(Guid BookingId, Guid PatientId, Guid BranchId, DateOnly Date)>> ActiveBookingsAsync(Guid[] sessionIds, CancellationToken ct) =>
+    public async Task<List<CancelledBooking>> ActiveBookingsAsync(Guid[] sessionIds, CancellationToken ct) =>
         (await (from b in db.Bookings.AsNoTracking()
                 join s in db.DoctorSessions.AsNoTracking() on b.SessionId equals s.SessionId
+                join d in db.Doctors.AsNoTracking() on s.DoctorId equals d.DoctorId
                 where sessionIds.Contains(b.SessionId) && b.Status == BookingStatuses.Booked
-                select new { b.BookingId, b.PatientId, s.BranchId, s.SessionDate }).ToListAsync(ct))
-        .Select(x => (x.BookingId, x.PatientId, x.BranchId, x.SessionDate)).ToList();
+                select new
+                {
+                    b.BookingId, b.PatientId, s.BranchId, s.SessionDate, s.DoctorId, d.FullName, b.PaymentStatus, b.Price,
+                    Online = db.OnlinePayments.Any(o => o.BookingId == b.BookingId && o.Purpose == OnlinePaymentPurposes.BookingFull
+                                                        && o.Status == OnlinePaymentStatuses.Succeeded && o.ProviderReference != null),
+                }).ToListAsync(ct))
+        .Select(x => new CancelledBooking(x.BookingId, x.PatientId, x.BranchId, x.SessionDate, x.DoctorId, x.FullName,
+            x.PaymentStatus == PaymentStatuses.Paid && x.Price > 0, x.PaymentStatus == PaymentStatuses.Paid ? x.Price : 0,
+            x.PaymentStatus == PaymentStatuses.Paid && x.Online)).ToList();
 
-    public async Task BookingsCancelledAsync(IEnumerable<(Guid BookingId, Guid PatientId, Guid BranchId, DateOnly Date)> bookings, string reason, CancellationToken ct)
+    /// <summary>رابط «حجوزاتي» مع فتح خيارات المبلغ مباشرة (تطبيق المريض: /patient?tab=bookings&amp;cancel_options={id}).</summary>
+    public const string CancelOptionsLink = "booking_cancel_options";
+
+    /// <summary>
+    /// نص الإلغاء حسب الدفع: المدفوع تُذكر له الخيارات الثلاثة (أو اثنان إن دُفع نقداً) ويُفتح له «حجوزاتي» على الخيارات،
+    /// وغير المدفوع لا يُذكر له أي مبلغ ويُقترح عليه إعادة الحجز فقط.
+    /// </summary>
+    public static (string Title, string Message, string LinkType) CancelledText(CancelledBooking b, string reason)
+    {
+        var head = $"ألغى {b.DoctorName} موعدك يوم {b.Date:yyyy-MM-dd} ({reason}).";
+        if (!b.Paid)
+            return ("أُلغي موعدك", $"{head} يمكنك إعادة الحجز على أقرب موعد من «حجوزاتي».", "booking");
+        var choices = b.PaidOnline
+            ? "إعادة الحجز على أقرب موعد، أو إبقاؤه رصيداً في محفظتك، أو استرجاعه إلى وسيلة الدفع"
+            : "إعادة الحجز على أقرب موعد، أو إبقاؤه رصيداً في محفظتك";
+        return ("أُلغي موعدك: اختر ما تريد بمبلغك", $"{head} مبلغك {b.Amount:N0} د.ع محفوظ لك. افتح «حجوزاتي» واختر: {choices}.", CancelOptionsLink);
+    }
+
+    public async Task BookingsCancelledAsync(IEnumerable<CancelledBooking> bookings, string reason, CancellationToken ct)
     {
         foreach (var b in bookings)
-            await NotifyPatientAsync(b.PatientId, b.BranchId, NotificationTypes.BookingCancelled, "أُلغي حجزك",
-                $"حجز يوم {b.Date:yyyy-MM-dd}: {reason}. المبلغ المدفوع يتحول رصيداً لك.", "booking", b.BookingId, ct);
+        {
+            var (title, message, link) = CancelledText(b, reason);
+            await NotifyPatientAsync(b.PatientId, b.BranchId, NotificationTypes.BookingCancelled, title, message, link, b.BookingId, ct);
+        }
     }
 
     /// <summary>المحاسبون ومديرو الفرع ومن يملك صلاحية المراجعة أو اعتماد الاسترجاع في الفرع.</summary>

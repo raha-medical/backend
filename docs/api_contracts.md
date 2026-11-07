@@ -1,6 +1,6 @@
 # عقود الـ API - v6
 
-**الإصدار:** v6 (الوسم `v1.3-handoff`) · **آخر commit للكود:** `ec3b223` (backend، الفرع staging) · **التاريخ:** 2026-11-07 · **عدد النقاط:** 247 (كل `[Http*]` في `src/AlRahma.Api/Controllers`، وكلها موثقة هنا) · **آخر ترحيل:** 027
+**الإصدار:** v6 (الوسم `v1.3-handoff`) · **آخر commit للكود:** `ec3b223` (backend، الفرع staging) · **التاريخ:** 2026-11-07 · **عدد النقاط:** 248 (كل `[Http*]` في `src/AlRahma.Api/Controllers`، وكلها موثقة هنا) · **آخر ترحيل:** 029 (028 محجوز لفرع ui/redesign)
 هذا ملف العقود الوحيد في المستودعات الثلاثة. القسم الأول يلخّص ما تغيّر منذ الوسم `v1.0-stable` (من `git diff v1.0-stable..staging` على الـ Controllers)، وبعده نص v5 الكامل.
 
 ## ما الجديد في v1.3-handoff (منذ v1.2-handoff)
@@ -15,6 +15,15 @@
 | «حان دورك» وتأكيد «تم» | `POST /me/queue-tickets/{id}/acknowledge-call` (قائمة)، و`call_ack_status` (acknowledged / waiting / no_response) و`call_ack_deadline` و`call_ack_timeout_minutes` في `GET /queue/live` | 7 |
 | مهلة عدم الرد | إعداد الفرع `queue.call_ack_timeout_minutes` (3، من 1 إلى 30) | 7، 18.x |
 | تطبيق المراجع | نغمة وتنبيه منبثق عند `notification.created`، وكتم محلي للصوت؛ شاشة «حان دورك» الكاملة | 7، 18.y |
+
+## ما الجديد في fix/patient-lifecycle (2026-11-07)
+
+| البند | النقاط والحقول | القسم |
+| --- | --- | --- |
+| «حضر» من الاستقبال | **جديد:** `POST /queue/tickets/{id}/present` (الترحيل 029: `call_ack_by`، `call_ack_staff_id`) | 7 |
+| من أكّد الحضور، وهل له تطبيق | `call_ack_by` (`patient` \| `staff` \| null) و`has_app` لكل عنصر في `GET /queue/live`، و`call_acknowledged_at`/`call_ack_by` في رد أزرار الطابور | 7 |
+| معاينة معلّقة من وجبة أخرى | `open_exams_elsewhere[]` في `GET /queue/live`، و`DOCTOR_BUSY` يعيد `ticket_id`, `ticket_number`, `patient_name`, `session_id`, `session_date`, `started_at`, `other_session` | 7 |
+| البوابة التجريبية | أي بطاقة Luhn بتاريخ غير منتهٍ وأي محفظة صحيحة الشكل تنجح؛ `CARD_NOT_FOUND` = رقم لا يجتاز Luhn؛ `07809999999` = `ACCOUNT_NOT_FOUND` | 6 |
 
 ## تغييرات v6 منذ v1.0-stable
 
@@ -1693,7 +1702,12 @@
 * **الصلاحية:** `doctor`.
 * بدء وانتهاء المعاينة. أوقاتهما تدخل في حساب متوسط المعاينة وإعادة حساب أوقات الانتظار.
 * **Response (200):** نفس شكل رد الاستدعاء بالحالة الجديدة.
-* البدء يقبل تذكرة مُستدعاة أو واصلة، ويخضع لقاعدة الدفع. مريض آخر في الغرفة: `409 DOCTOR_BUSY`.
+* البدء يقبل تذكرة مُستدعاة أو واصلة، ويخضع لقاعدة الدفع. **لا يتطلب «تم، أنا قادم» ولا «حضر».**
+* معاينة أخرى مفتوحة (`in_room`) للطبيب نفسه في **أي** وجبة: `409 DOCTOR_BUSY` مع `ticket_id`, `ticket_number`, `patient_name`, `session_id`, `session_date`, `started_at`, و`other_session: true` إذا كانت من وجبة أخرى (معاينة سابقة لم تُغلق). تُغلق بـ `complete` على `ticket_id` نفسه (`{ "call_next": false, "expect_return": false }`).
+
+### `POST /queue/tickets/{ticket_id}/present`
+* **الصلاحية:** `queue.manage` (الاستقبال، الطبيب، المدير). **الوصف:** «حضر»: تأكيد حضور مراجع **مستدعى** نيابة عنه (بلا هاتف أو بلا تطبيق، أو لم يضغط «تم»). يسجل `call_acknowledged_at` و`call_ack_by: "staff"` والموظف، ويوقف تكرار تنبيه الاستدعاء، فتختفي «لم يرد». تكراره يعيد نفس النتيجة. ليس شرطاً للدخول.
+* **Response (200):** رد أزرار الطابور مع `call_acknowledged_at` و`call_ack_by`. التذكرة ليست `called`: `409 INVALID_TICKET_STATE`.
 
 ### `POST /queue/tickets/{ticket_id}/no-show`
 * **الصلاحية:** `receptionist`، `doctor`.

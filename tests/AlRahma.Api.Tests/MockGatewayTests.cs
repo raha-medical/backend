@@ -58,6 +58,9 @@ public class MockGatewayTests(TestApp app)
         return (me, patient, Id(booking.Body, "booking_id"));
     }
 
+    internal Task<(HttpClient Me, Guid Patient, Guid Booking)> BookingForTestsAsync() => BookingAsync();
+    internal static Task<(Guid Op, string Ref)> CreateForTestsAsync(HttpClient me, Guid patient, Guid booking, string provider) => CreateAsync(me, patient, booking, provider);
+
     private static async Task<(Guid Op, string Ref)> CreateAsync(HttpClient me, Guid patient, Guid booking, string provider)
     {
         var op = await Api.PostAsync(me, "/api/v1/online-payments", new { purpose = "booking_full", patient_id = patient, booking_id = booking, provider }, Guid.NewGuid());

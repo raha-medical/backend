@@ -88,11 +88,14 @@ psql "$DATABASE_URL" -f database/migrations/024_branch_name_en.sql
 psql "$DATABASE_URL" -f database/migrations/025_native_backup.sql
 psql "$DATABASE_URL" -f database/migrations/026_assistant_daily.sql
 psql "$DATABASE_URL" -f database/migrations/027_notifications_followup_delay.sql
+# 028 محجوز لفرع ui/redesign (028_mock_gateway_no_account.sql)
+psql "$DATABASE_URL" -f database/migrations/029_call_ack_by_staff.sql
 ```
 
 **التراجع:** من الترحيل 009 فصاعداً لكل ترحيل سكربت تراجع في `database/migrations/down/` يُشغل بالترتيب العكسي:
 
 ```bash
+psql "$DATABASE_URL" -f database/migrations/down/029_call_ack_by_staff_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/027_notifications_followup_delay_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/026_assistant_daily_down.sql
 psql "$DATABASE_URL" -f database/migrations/down/025_native_backup_down.sql

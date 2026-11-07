@@ -374,7 +374,9 @@ public class QaDefectsAndPhase4Tests(TestApp app)
         // مهمة الغياب التلقائي: حدث no_show، والحجز لا يُسجل عليه موظف
         var jobPatient = await new QueueTests(app).PatientAsync(s.Reception, "غياب تلقائي");
         var jobBooking = await BookAsync(s.Reception, jobPatient, await SessionAsync(s, Today));
-        await app.ExecAsync($"UPDATE doctor_sessions SET session_date = session_date - 1, status = 'open' WHERE session_id = (SELECT session_id FROM bookings WHERE booking_id = '{jobBooking}')");
+        // A session ending yesterday at 23:59 is still within the 120-minute
+        // grace period just after midnight. Make this session unambiguously ended.
+        await app.ExecAsync($"UPDATE doctor_sessions SET session_date = session_date - 1, start_time = '00:00', end_time = '00:01', extended_end_time = NULL, status = 'open' WHERE session_id = (SELECT session_id FROM bookings WHERE booking_id = '{jobBooking}')");
         using (var scope = app.Server.Services.CreateScope())
             Assert.True(await scope.ServiceProvider.GetRequiredService<ScheduledJobs>().AutoNoShowAsync(default) > 0);
         Assert.Equal("no_show", (await staffEvents.WaitAsync("no_show", jobBooking))["status"]?.ToString());

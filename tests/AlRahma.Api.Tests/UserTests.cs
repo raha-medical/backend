@@ -1,4 +1,5 @@
 using Xunit;
+using AlRahma.Domain.Common;
 
 namespace AlRahma.Api.Tests;
 
@@ -214,7 +215,13 @@ public class UserTests(TestApp app)
 
         var roles = await Api.GetAsync(c, "/api/v1/roles");
         Assert.Equal(200, roles.Status);
-        Assert.Equal(8, roles.Body!["items"]!.AsArray().Count);
+        // Other scenarios create custom roles in the shared fixture. The eight
+        // built-in roles must still be returned, alongside active custom roles.
+        var items = roles.Body!["items"]!.AsArray();
+        Assert.Equal(Roles.All.OrderBy(code => code), items
+            .Where(role => role!["is_system"]!.GetValue<bool>())
+            .Select(role => role!["code"]!.GetValue<string>()).OrderBy(code => code));
+        Assert.Equal(await app.ScalarAsync<long>("SELECT count(*) FROM roles WHERE is_active"), (long)items.Count);
     }
 
     [SkippableFact]
